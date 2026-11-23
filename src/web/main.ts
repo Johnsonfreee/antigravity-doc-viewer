@@ -1,10 +1,12 @@
 import { ViewerMcpClient } from './mcpClient';
 import { mountPdfViewer, type OutlineNode, type PdfController } from './viewers/pdfViewer';
+import { mountDocxOfficeViewer, type DocxController, type OfficeViewMode } from './viewers/docxOfficeViewer';
+import { mountSheetOfficeViewer, type SheetController } from './viewers/sheetOfficeViewer';
+import { mountSlideOfficeViewer, type SlideController } from './viewers/slideOfficeViewer';
 import {
   mountHtmlView,
   mountImageView,
   mountRichDocView,
-  mountSpreadsheetView,
   mountTextView,
   type SimpleViewerController,
 } from './viewers/docViewers';
@@ -17,6 +19,17 @@ interface FileEntry {
   mtimeMs: number;
   ext: string;
   kind: string;
+}
+
+interface WorktreeMeta {
+  originalPath: string;
+  fileName: string;
+  kind: string;
+  status: 'draft' | 'clean';
+  draftSize: number;
+  summary: string;
+  updatedAt: number;
+  versions: Array<{ versionId: string; savedAt: number; size: number; summary: string }>;
 }
 
 interface ViewerState {
@@ -39,19 +52,19 @@ interface OpenTab {
   rawBuffer?: ArrayBuffer;
   page?: number;
   sheet?: string;
+  mode: OfficeViewMode;
+  worktree?: WorktreeMeta | null;
 }
 
 const FILTER_EXT_MAP: Record<string, string[] | undefined> = {
   all: undefined,
+  office: ['.docx', '.xlsx', '.xls', '.xlsm', '.xlsb', '.ods', '.csv', '.tsv', '.pptx'],
   pdf: ['.pdf'],
-  docs: ['.md', '.markdown', '.mdx', '.docx', '.txt'],
-  sheet: ['.xlsx', '.xls', '.xlsm', '.xlsb', '.ods', '.csv', '.tsv'],
+  docs: ['.md', '.markdown', '.mdx', '.txt'],
   html: ['.html', '.htm', '.xhtml'],
-  code: ['.ts', '.tsx', '.js', '.jsx', '.py', '.json', '.yaml', '.yml', '.css', '.sql', '.sh', '.ps1'],
 };
 
 const mcp = new ViewerMcpClient();
-
 const tabs: OpenTab[] = [];
 let activeTabId: string | null = null;
 let currentDir = '';
@@ -60,28 +73,36 @@ let currentEntries: FileEntry[] = [];
 let activeFilter = 'all';
 let searchQuery = '';
 let state: ViewerState = { recentFiles: [], bookmarks: [], filePrefs: {} };
-let activePdfCtrl: PdfController | null = null;
-let activeSimpleCtrl: SimpleViewerController | null = null;
-let currentOutline: OutlineNode[] = [];
 let selectedSnippet = '';
+let fitModeFlag = true;
+
+let activePdfCtrl: PdfController | null = null;
+let activeDocxCtrl: DocxController | null = null;
+let activeSheetCtrl: SheetController | null = null;
+let activeSlideCtrl: SlideController | null = null;
+let activeSimpleCtrl: SimpleViewerController | null = null;
 
 const $ = <T extends HTMLElement>(sel: string) => document.querySelector<T>(sel)!;
 
 const drawerEl = $('#drawer');
+const rightDrawerEl = $('#right-drawer');
 const tabsStripEl = $('#tabs-strip');
 const pathInputEl = $<HTMLInputElement>('#path-input');
+const modeAppBadgeEl = $('#mode-app-badge');
+const worktreeBannerEl = $('#worktree-banner');
+const worktreeBannerTextEl = $('#worktree-banner-text');
+const rightDraftDotEl = $('#right-draft-dot');
 const quickRootsEl = $('#quick-roots');
 const breadcrumbsEl = $('#breadcrumbs');
 const fileListEl = $('#file-list');
 const outlineListEl = $('#outline-list');
 const bookmarksListEl = $('#bookmarks-list');
 const recentListEl = $('#recent-list');
+const worktreePanelBodyEl = $('#worktree-panel-body');
 const welcomeEl = $('#viewer-welcome');
 const viewerContentEl = $('#viewer-content');
-const bookmarkBtn = $<HTMLButtonElement>('#btn-bookmark');
-const nativeTabBtn = $<HTMLButtonElement>('#btn-native-tab');
-const attachCtxBtn = $<HTMLButtonElement>('#btn-attach-ctx');
-const askAgentBtn = $<HTMLButtonElement>('#btn-ask-agent');
+const plusMenuEl = $('#plus-menu');
+const modeMenuEl = $('#mode-menu');
 const selectionBarEl = $('#selection-bar');
 const selectionPreviewEl = $('#selection-preview');
 const toastEl = $('#toast');
@@ -101,16 +122,26 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function badgeForKind(kind: string, ext: string): { cls: string; label: string } {
+  if (kind === 'docx') return { cls: 'w', label: 'W' };
+  if (kind === 'spreadsheet') return { cls: 'x', label: 'X' };
+  if (kind === 'slides') return { cls: 'p', label: 'P' };
+  if (kind === 'pdf') return { cls: 'pdf', label: 'PDF' };
+  if (kind === 'markdown') return { cls: 'md', label: 'MD' };
+  if (kind === 'html') return { cls: 'html', label: 'HTM' };
+  return { cls: 'txt', label: ext ? ext.slice(1, 4).toUpperCase() : 'DOC' };
+}
+
 function kindBadgeLabel(kind: string, ext: string): string {
   if (kind === 'dir') return 'DIR';
   if (kind === 'pdf') return 'PDF';
   if (kind === 'markdown') return 'MD';
   if (kind === 'docx') return 'DOCX';
   if (kind === 'spreadsheet') return ext === '.csv' ? 'CSV' : 'XLS';
+  if (kind === 'slides') return 'PPTX';
   if (kind === 'html') return 'HTML';
   if (kind === 'image') return 'IMG';
-  if (kind === 'code') return ext.replace('.', '').toUpperCase() || 'CODE';
-  return 'TXT';
+  return ext.replace('.', '').toUpperCase() || 'TXT';
 }
 
 function activeTab(): OpenTab | undefined {
@@ -125,10 +156,15 @@ function isBookmarked(filePath?: string): boolean {
 function updateCapabilitiesUi() {
   const canCtx = mcp.canUpdateContext();
   const canMsg = mcp.canMessage();
-  attachCtxBtn.classList.toggle('hidden', !canCtx);
-  askAgentBtn.classList.toggle('hidden', !canMsg);
+  $('#btn-attach-ctx').classList.toggle('hidden', !canCtx);
+  $('#btn-ask-agent').classList.toggle('hidden', !canMsg);
+  $('#btn-ask-review').classList.toggle('hidden', !canMsg);
   $('#sel-attach').classList.toggle('hidden', !canCtx);
   $('#sel-ask').classList.toggle('hidden', !canMsg);
+  $('#ai-cap-hint').textContent =
+    canCtx || canMsg
+      ? '选中文档文字或点击上方按钮，可直接把当前页面内容发送给对话中的 Agent。'
+      : '当前为全局独立视图（无对话上下文），请在侧边栏会话中打开以使用对话联动。';
 }
 
 function renderTabs() {
@@ -138,10 +174,23 @@ function renderTabs() {
     el.className = `doc-tab ${tab.id === activeTabId ? 'active' : ''}`;
     el.title = tab.path || tab.name;
 
+    const badge = badgeForKind(tab.kind, tab.ext);
+    const badgeEl = document.createElement('span');
+    badgeEl.className = `app-badge ${badge.cls}`;
+    badgeEl.textContent = badge.label;
+    el.appendChild(badgeEl);
+
     const span = document.createElement('span');
     span.className = 'doc-tab-title';
     span.textContent = tab.name;
     el.appendChild(span);
+
+    if (tab.worktree?.status === 'draft') {
+      const dot = document.createElement('span');
+      dot.className = 'draft-dot';
+      dot.title = 'Worktree 有未合并草稿';
+      el.appendChild(dot);
+    }
 
     const closeBtn = document.createElement('button');
     closeBtn.className = 'doc-tab-close';
@@ -158,13 +207,19 @@ function renderTabs() {
   }
 
   const tab = activeTab();
-  bookmarkBtn.disabled = !tab?.path;
-  nativeTabBtn.disabled = !tab?.path;
-  bookmarkBtn.classList.toggle('bookmarked', isBookmarked(tab?.path));
+  const b = tab ? badgeForKind(tab.kind, tab.ext) : { cls: 'w', label: 'W' };
+  modeAppBadgeEl.className = `app-badge ${b.cls}`;
+  modeAppBadgeEl.textContent = b.label;
+
+  const hasDraft = tab?.worktree?.status === 'draft';
+  worktreeBannerEl.classList.toggle('hidden', !hasDraft);
+  rightDraftDotEl.classList.toggle('hidden', !hasDraft);
+  if (hasDraft && tab?.worktree) {
+    worktreeBannerTextEl.textContent = `Worktree 草稿待审核 · ${tab.worktree.summary || '有未合并修改'}`;
+  }
 }
 
 function renderOutline(items: OutlineNode[]) {
-  currentOutline = items;
   if (!items.length) {
     outlineListEl.innerHTML = `<div class="empty-hint">当前文档无目录大纲</div>`;
     return;
@@ -177,12 +232,11 @@ function renderOutline(items: OutlineNode[]) {
     btn.textContent = item.page ? `${item.title} (p.${item.page})` : item.title;
     btn.title = item.title;
     btn.addEventListener('click', () => {
-      if (item.page && activePdfCtrl) {
-        activePdfCtrl.goToPage(item.page);
-      } else if (item.id && activeSimpleCtrl?.scrollToHeading) {
-        activeSimpleCtrl.scrollToHeading(item.id);
-      }
-      if (window.innerWidth <= 600) drawerEl.classList.add('collapsed');
+      if (item.page && activePdfCtrl) activePdfCtrl.goToPage(item.page);
+      else if (item.page && activeSlideCtrl) activeSlideCtrl.goToSlide(item.page);
+      else if (item.id && activeDocxCtrl) activeDocxCtrl.scrollToHeading(item.id);
+      else if (item.id && activeSimpleCtrl?.scrollToHeading) activeSimpleCtrl.scrollToHeading(item.id);
+      if (window.innerWidth <= 680) drawerEl.classList.add('collapsed');
     });
     outlineListEl.appendChild(btn);
   }
@@ -213,6 +267,71 @@ function renderHistory() {
   renderSection(recentListEl, state.recentFiles, '暂无最近打开文档');
 }
 
+async function refreshRightWorktreePanel() {
+  const tab = activeTab();
+  if (!tab?.path) {
+    worktreePanelBodyEl.innerHTML = `<div class="empty-hint">打开工作区文档后可管理 Worktree 与历史版本</div>`;
+    return;
+  }
+  try {
+    const res = await mcp.callTool<{ items: WorktreeMeta[] }>('app_get_worktree_status', { path: tab.path });
+    const wt = res.items[0] ?? null;
+    tab.worktree = wt;
+    renderTabs();
+
+    const statusLabel = wt?.status === 'draft' ? '有待审核草稿' : '与磁盘同步';
+    const versionsHtml = (wt?.versions || []).length
+      ? wt!.versions
+          .map(
+            (v) => `
+          <div class="wt-version-row">
+            <div style="min-width:0;flex:1">
+              <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${v.summary || v.versionId}</div>
+              <div style="font-size:10px;color:var(--fg-3)">${new Date(v.savedAt).toLocaleString()} · ${formatSize(v.size)}</div>
+            </div>
+            <button class="btn-sm" data-restore="${v.versionId}">恢复</button>
+          </div>`,
+          )
+          .join('')
+      : `<div class="empty-hint" style="padding:8px">暂无历史备份版本</div>`;
+
+    worktreePanelBodyEl.innerHTML = `
+      <div class="wt-card">
+        <div class="wt-card-title">${tab.name}</div>
+        <div style="font-size:11.5px;color:var(--fg-2)">状态：${statusLabel}</div>
+        ${wt?.summary ? `<div style="font-size:11.5px;color:var(--fg-2)">最近说明：${wt.summary}</div>` : ''}
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px">
+          <button id="rp-edit" class="btn-sm">进入编辑</button>
+          <button id="rp-compare" class="btn-sm">查看差异</button>
+          ${wt?.status === 'draft' ? '<button id="rp-approve" class="btn-sm primary">合并保存</button><button id="rp-discard" class="btn-sm danger">丢弃</button>' : ''}
+        </div>
+      </div>
+      <div class="section-title" style="padding-left:2px">版本历史</div>
+      ${versionsHtml}
+    `;
+
+    worktreePanelBodyEl.querySelector('#rp-edit')?.addEventListener('click', () => void switchActiveMode('edit'));
+    worktreePanelBodyEl.querySelector('#rp-compare')?.addEventListener('click', () => void switchActiveMode('compare'));
+    worktreePanelBodyEl.querySelector('#rp-approve')?.addEventListener('click', () => void handleWorktreeApprove());
+    worktreePanelBodyEl.querySelector('#rp-discard')?.addEventListener('click', () => void handleWorktreeDiscard());
+    worktreePanelBodyEl.querySelectorAll<HTMLButtonElement>('[data-restore]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        await mcp.callTool('app_worktree_action', {
+          action: 'restore_version',
+          path: tab.path,
+          versionId: btn.dataset.restore,
+          mode: 'draft',
+        });
+        showToast('已恢复版本到草稿 Worktree');
+        await refreshRightWorktreePanel();
+        await activateTab(tab.id);
+      });
+    });
+  } catch {
+    worktreePanelBodyEl.innerHTML = `<div class="empty-hint">该文件暂无 Worktree 记录</div>`;
+  }
+}
+
 function renderQuickRoots() {
   quickRootsEl.innerHTML = '';
   for (const root of quickRoots.slice(0, 8)) {
@@ -233,17 +352,13 @@ function renderBreadcrumbs(dir: string) {
   let acc = dir.startsWith('/') ? '/' : '';
 
   parts.forEach((part, idx) => {
-    if (idx === 0 && /^[A-Za-z]:$/.test(part)) {
-      acc = `${part}\\`;
-    } else if (acc === '/' || acc.endsWith('\\')) {
-      acc += part;
-    } else {
-      acc += `${sep}${part}`;
-    }
+    if (idx === 0 && /^[A-Za-z]:$/.test(part)) acc = `${part}\\`;
+    else if (acc === '/' || acc.endsWith('\\')) acc += part;
+    else acc += `${sep}${part}`;
     const targetPath = acc;
     const btn = document.createElement('button');
     btn.className = 'crumb-btn';
-    btn.textContent = idx === 0 ? part : `${part}`;
+    btn.textContent = part;
     btn.addEventListener('click', () => void navigateDir(targetPath));
     breadcrumbsEl.appendChild(btn);
 
@@ -289,7 +404,7 @@ function renderFileList() {
         void navigateDir(entry.path);
       } else {
         void openDiskFile(entry.path);
-        if (window.innerWidth <= 600) drawerEl.classList.add('collapsed');
+        if (window.innerWidth <= 680) drawerEl.classList.add('collapsed');
       }
     });
     fileListEl.appendChild(btn);
@@ -355,9 +470,45 @@ async function runRecursiveSearch() {
 function unmountActiveViewer() {
   activePdfCtrl?.destroy();
   activePdfCtrl = null;
+  activeDocxCtrl?.destroy();
+  activeDocxCtrl = null;
+  activeSheetCtrl?.destroy();
+  activeSheetCtrl = null;
+  activeSlideCtrl?.destroy();
+  activeSlideCtrl = null;
   activeSimpleCtrl?.destroy?.();
   activeSimpleCtrl = null;
   renderOutline([]);
+}
+
+async function switchActiveMode(mode: OfficeViewMode) {
+  const tab = activeTab();
+  if (!tab) return;
+  tab.mode = mode;
+  if (activeDocxCtrl) await activeDocxCtrl.setMode(mode);
+  else if (activeSheetCtrl) await activeSheetCtrl.setMode(mode);
+  else if (activeSlideCtrl) await activeSlideCtrl.setMode(mode);
+  else showToast('当前文件类型仅支持阅读模式');
+}
+
+async function handleWorktreeApprove() {
+  const tab = activeTab();
+  if (!tab?.path) return;
+  await mcp.callTool('app_worktree_action', { action: 'approve', path: tab.path });
+  showToast('已将 Worktree 草稿合并保存到磁盘');
+  await refreshRightWorktreePanel();
+  if (tab.mode === 'compare') tab.mode = 'print';
+  await activateTab(tab.id);
+}
+
+async function handleWorktreeDiscard() {
+  const tab = activeTab();
+  if (!tab?.path) return;
+  await mcp.callTool('app_worktree_action', { action: 'discard', path: tab.path });
+  showToast('已丢弃 Worktree 草稿');
+  await refreshRightWorktreePanel();
+  if (tab.mode === 'compare') tab.mode = 'print';
+  await activateTab(tab.id);
 }
 
 async function activateTab(tabId: string) {
@@ -375,7 +526,56 @@ async function activateTab(tabId: string) {
   const prefs = tab.path ? state.filePrefs[tab.path] : undefined;
 
   try {
-    if (tab.kind === 'pdf') {
+    if (tab.kind === 'docx') {
+      activeDocxCtrl = await mountDocxOfficeViewer({
+        container: viewerContentEl,
+        mcp,
+        filePath: tab.path,
+        rawBuffer: tab.rawBuffer,
+        mode: tab.mode,
+        zoomSetting: fitModeFlag ? 'fit' : 1,
+        onOutline: renderOutline,
+        onWorktreeChanged: () => void refreshRightWorktreePanel(),
+        onToast: showToast,
+      });
+    } else if (tab.kind === 'spreadsheet') {
+      if (tab.path) {
+        activeSheetCtrl = await mountSheetOfficeViewer({
+          container: viewerContentEl,
+          mcp,
+          filePath: tab.path,
+          initialSheet: tab.sheet ?? prefs?.sheet,
+          initialPage: tab.page ?? 1,
+          mode: tab.mode,
+          onSheetChange: (sheet) => {
+            tab.sheet = sheet;
+            if (tab.path) {
+              state.filePrefs[tab.path] = { ...state.filePrefs[tab.path], sheet };
+              scheduleSaveState({ filePrefs: { [tab.path]: state.filePrefs[tab.path] } });
+            }
+          },
+          onWorktreeChanged: () => void refreshRightWorktreePanel(),
+          onToast: showToast,
+        });
+      } else {
+        viewerContentEl.innerHTML = `<div class="error-box">请通过文件路径或目录打开电子表格文件。</div>`;
+      }
+    } else if (tab.kind === 'slides') {
+      if (tab.path) {
+        activeSlideCtrl = await mountSlideOfficeViewer({
+          container: viewerContentEl,
+          mcp,
+          filePath: tab.path,
+          initialSlide: tab.page ?? 1,
+          mode: tab.mode,
+          onOutline: renderOutline,
+          onWorktreeChanged: () => void refreshRightWorktreePanel(),
+          onToast: showToast,
+        });
+      } else {
+        viewerContentEl.innerHTML = `<div class="error-box">请通过文件路径或目录打开 PowerPoint (.pptx) 文件。</div>`;
+      }
+    } else if (tab.kind === 'pdf') {
       activePdfCtrl = await mountPdfViewer({
         container: viewerContentEl,
         mcp,
@@ -400,7 +600,7 @@ async function activateTab(tabId: string) {
           }
         },
       });
-    } else if (tab.kind === 'markdown' || tab.kind === 'docx') {
+    } else if (tab.kind === 'markdown') {
       if (!tab.path && tab.rawBuffer) {
         const text = new TextDecoder().decode(tab.rawBuffer);
         viewerContentEl.innerHTML = `<div class="viewer-scroll"><pre class="prose" style="white-space:pre-wrap">${text.replace(/</g, '&lt;')}</pre></div>`;
@@ -408,32 +608,13 @@ async function activateTab(tabId: string) {
         activeSimpleCtrl = await mountRichDocView({
           container: viewerContentEl,
           mcp,
-          kind: tab.kind,
+          kind: 'markdown',
           filePath: tab.path,
           onOutline: renderOutline,
         });
       }
     } else if (tab.kind === 'legacy_doc') {
-      viewerContentEl.innerHTML = `<div class="error-box">暂不支持旧版二进制 <code>.doc</code> 格式，请转换为 <code>.docx</code> 或 <code>.pdf</code> 后在侧边栏打开。</div>`;
-    } else if (tab.kind === 'spreadsheet') {
-      if (tab.path) {
-        activeSimpleCtrl = await mountSpreadsheetView({
-          container: viewerContentEl,
-          mcp,
-          filePath: tab.path,
-          initialSheet: tab.sheet ?? prefs?.sheet,
-          initialPage: tab.page ?? 1,
-          onSheetChange: (sheet) => {
-            tab.sheet = sheet;
-            if (tab.path) {
-              state.filePrefs[tab.path] = { ...state.filePrefs[tab.path], sheet };
-              scheduleSaveState({ filePrefs: { [tab.path]: state.filePrefs[tab.path] } });
-            }
-          },
-        });
-      } else {
-        viewerContentEl.innerHTML = `<div class="error-box">拖拽 Excel 需要通过文件路径或右侧目录打开以便服务端分页解析。</div>`;
-      }
+      viewerContentEl.innerHTML = `<div class="error-box">暂不支持旧版二进制 <code>.doc</code> 格式，请转换为 <code>.docx</code> 或 <code>.pdf</code> 后打开。</div>`;
     } else if (tab.kind === 'html') {
       activeSimpleCtrl = await mountHtmlView({
         container: viewerContentEl,
@@ -451,23 +632,19 @@ async function activateTab(tabId: string) {
       });
     } else if (tab.kind === 'binary') {
       viewerContentEl.innerHTML = `<div class="error-box">二进制文件（${tab.ext || 'binary'}）暂不支持直接文本预览。</div>`;
-    } else {
-      if (tab.path) {
-        activeSimpleCtrl = await mountTextView({
-          container: viewerContentEl,
-          mcp,
-          filePath: tab.path,
-        });
-      } else if (tab.rawBuffer) {
-        const txt = new TextDecoder().decode(tab.rawBuffer);
-        viewerContentEl.innerHTML = `<div class="viewer-scroll"><pre style="font-family:var(--font-code);white-space:pre-wrap">${txt.replace(/</g, '&lt;')}</pre></div>`;
-      }
+    } else if (tab.path) {
+      activeSimpleCtrl = await mountTextView({ container: viewerContentEl, mcp, filePath: tab.path });
+    } else if (tab.rawBuffer) {
+      const txt = new TextDecoder().decode(tab.rawBuffer);
+      viewerContentEl.innerHTML = `<div class="viewer-scroll"><pre style="font-family:var(--font-code);color:var(--chrome-fg);white-space:pre-wrap">${txt.replace(/</g, '&lt;')}</pre></div>`;
     }
   } catch (err) {
     viewerContentEl.innerHTML = `<div class="error-box">渲染失败：${
       err instanceof Error ? err.message : String(err)
     }</div>`;
   }
+
+  void refreshRightWorktreePanel();
 }
 
 function closeTab(tabId: string) {
@@ -483,6 +660,7 @@ function closeTab(tabId: string) {
       welcomeEl.classList.remove('hidden');
       pathInputEl.value = '';
       renderTabs();
+      void refreshRightWorktreePanel();
     } else {
       const next = tabs[Math.max(0, idx - 1)];
       void activateTab(next.id);
@@ -496,6 +674,7 @@ async function openDiskFile(filePath: string, opts: { page?: number; sheet?: str
   try {
     const res = await mcp.callTool<{
       file: { path: string; name: string; dir: string; ext: string; kind: string; size: number };
+      worktree?: WorktreeMeta | null;
       state: ViewerState;
     }>('app_open_file_meta', { path: filePath, recordRecent: true });
 
@@ -506,8 +685,10 @@ async function openDiskFile(filePath: string, opts: { page?: number; sheet?: str
     if (existing) {
       if (opts.page) existing.page = opts.page;
       if (opts.sheet) existing.sheet = opts.sheet;
+      existing.worktree = res.worktree ?? null;
       await activateTab(existing.id);
       if (opts.page && activePdfCtrl) activePdfCtrl.goToPage(opts.page);
+      if (opts.page && activeSlideCtrl) activeSlideCtrl.goToSlide(opts.page);
       return;
     }
 
@@ -520,6 +701,8 @@ async function openDiskFile(filePath: string, opts: { page?: number; sheet?: str
       size: res.file.size,
       page: opts.page,
       sheet: opts.sheet,
+      mode: 'print',
+      worktree: res.worktree ?? null,
     };
     tabs.push(tab);
     await activateTab(tab.id);
@@ -528,26 +711,45 @@ async function openDiskFile(filePath: string, opts: { page?: number; sheet?: str
   }
 }
 
+async function createOfficeDocument(kind: 'docx' | 'xlsx' | 'pptx') {
+  const baseDir = currentDir || quickRoots[0]?.path || '.';
+  const sep = baseDir.includes('\\') ? '\\' : '/';
+  const ts = new Date().toISOString().slice(11, 19).replace(/:/g, '');
+  const targetPath = `${baseDir}${baseDir.endsWith(sep) ? '' : sep}untitled-${ts}.${kind}`;
+  try {
+    const res = await mcp.callTool<{ file: { path: string } }>('app_create_office_file', {
+      path: targetPath,
+      kind,
+      title: `新建 ${kind.toUpperCase()} 文档`,
+    });
+    await openDiskFile(res.file.path);
+    await switchActiveMode('edit');
+    if (currentDir) void navigateDir(currentDir);
+  } catch (err) {
+    showToast(`新建失败：${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 async function openLocalDroppedFile(file: File) {
   const name = file.name;
   const ext = name.includes('.') ? name.slice(name.lastIndexOf('.')).toLowerCase() : '';
   const kind =
-    ext === '.pdf'
-      ? 'pdf'
-      : ext === '.html' || ext === '.htm'
-        ? 'html'
-        : ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.ico'].includes(ext)
-          ? 'image'
-          : ext === '.md' || ext === '.markdown'
-            ? 'markdown'
-            : ext === '.docx'
-              ? 'docx'
-              : ['.xlsx', '.xls', '.csv', '.tsv'].includes(ext)
+    ext === '.docx'
+      ? 'docx'
+      : ext === '.pdf'
+        ? 'pdf'
+        : ext === '.html' || ext === '.htm'
+          ? 'html'
+          : ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.ico'].includes(ext)
+            ? 'image'
+            : ext === '.md' || ext === '.markdown'
+              ? 'markdown'
+              : ['.xlsx', '.xls', '.csv', '.tsv', '.pptx'].includes(ext)
                 ? 'spreadsheet'
                 : 'text';
 
-  if (kind === 'docx' || kind === 'spreadsheet') {
-    showToast(`${name} 请通过左侧文件树或路径栏打开以启用服务端完整解析`);
+  if (ext === '.xlsx' || ext === '.xls' || ext === '.csv' || ext === '.tsv' || ext === '.pptx') {
+    showToast(`${name} 请通过文件夹按钮或路径栏打开，以启用完整的服务端编辑与 Worktree 能力`);
     return;
   }
 
@@ -559,6 +761,7 @@ async function openLocalDroppedFile(file: File) {
     ext,
     size: file.size,
     rawBuffer,
+    mode: 'print',
   };
   tabs.push(tab);
   await activateTab(tab.id);
@@ -568,28 +771,161 @@ async function buildContextPayload(): Promise<string> {
   const tab = activeTab();
   if (!tab) return '';
   if (selectedSnippet) {
-    return `[Doc Viewer Selection]\nFile: ${tab.path || tab.name}${activePdfCtrl ? ` (Page ${activePdfCtrl.getCurrentPage()})` : ''}\n\n${selectedSnippet}`;
+    return `[Office Workbench Selection]\nFile: ${tab.path || tab.name}${activePdfCtrl ? ` (Page ${activePdfCtrl.getCurrentPage()})` : ''}\n\n${selectedSnippet}`;
   }
   if (activePdfCtrl) {
     const text = await activePdfCtrl.getCurrentPageText();
-    return `[Doc Viewer PDF Page ${activePdfCtrl.getCurrentPage()}/${activePdfCtrl.getTotalPages()}]\nFile: ${tab.path || tab.name}\n\n${text.slice(0, 6000)}`;
+    return `[PDF Page ${activePdfCtrl.getCurrentPage()}/${activePdfCtrl.getTotalPages()}]\nFile: ${tab.path || tab.name}\n\n${text.slice(0, 6000)}`;
+  }
+  if (activeDocxCtrl) {
+    return `[Word Document]\nFile: ${tab.path || tab.name}\n\n${activeDocxCtrl.getContextSummary()}`;
+  }
+  if (activeSheetCtrl) {
+    return `[Spreadsheet]\nFile: ${tab.path || tab.name}\n\n${activeSheetCtrl.getContextSummary()}`;
+  }
+  if (activeSlideCtrl) {
+    return `[Presentation]\nFile: ${tab.path || tab.name}\n\n${activeSlideCtrl.getContextSummary()}`;
   }
   if (activeSimpleCtrl) {
-    return `[Doc Viewer Content]\nFile: ${tab.path || tab.name}\n\n${activeSimpleCtrl.getContextSummary()}`;
+    return `[Document]\nFile: ${tab.path || tab.name}\n\n${activeSimpleCtrl.getContextSummary()}`;
   }
   return `File: ${tab.path || tab.name}`;
 }
 
+function positionPopover(menu: HTMLElement, anchor: HTMLElement) {
+  const rect = anchor.getBoundingClientRect();
+  menu.style.top = `${rect.bottom + 4}px`;
+  const maxLeft = Math.max(8, window.innerWidth - 210);
+  menu.style.left = `${Math.min(rect.left, maxLeft)}px`;
+  menu.classList.remove('hidden');
+}
+
+function closePopovers() {
+  plusMenuEl.classList.add('hidden');
+  modeMenuEl.classList.add('hidden');
+}
+
 function wireEvents() {
-  $('#btn-toggle-drawer').addEventListener('click', () => {
+  const toggleLeftDrawer = () => {
     drawerEl.classList.toggle('collapsed');
+    $('#btn-toggle-drawer').classList.toggle('active', !drawerEl.classList.contains('collapsed'));
+  };
+  $('#btn-toggle-drawer').addEventListener('click', toggleLeftDrawer);
+  $('#btn-folder-browse').addEventListener('click', () => {
+    drawerEl.classList.remove('collapsed');
+    $('#btn-toggle-drawer').classList.add('active');
   });
+  $('#welcome-browse').addEventListener('click', () => {
+    drawerEl.classList.remove('collapsed');
+    $('#btn-toggle-drawer').classList.add('active');
+  });
+
+  $('#btn-toggle-right').addEventListener('click', () => {
+    rightDrawerEl.classList.toggle('collapsed');
+    $('#btn-toggle-right').classList.toggle('active', !rightDrawerEl.classList.contains('collapsed'));
+    if (!rightDrawerEl.classList.contains('collapsed')) void refreshRightWorktreePanel();
+  });
+
+  $('#btn-toggle-fit').addEventListener('click', () => {
+    fitModeFlag = !fitModeFlag;
+    $('#btn-toggle-fit').classList.toggle('active', fitModeFlag);
+    activeDocxCtrl?.setZoom(fitModeFlag ? 'fit' : 1);
+    showToast(fitModeFlag ? '已切换到适应侧栏宽度' : '已切换到 100% 原始宽度');
+  });
+
+  $('#btn-refresh').addEventListener('click', () => {
+    const tab = activeTab();
+    if (tab) void activateTab(tab.id);
+    else if (currentDir) void navigateDir(currentDir);
+  });
+
+  $('#btn-plus').addEventListener('click', (e) => {
+    e.stopPropagation();
+    const wasHidden = plusMenuEl.classList.contains('hidden');
+    closePopovers();
+    if (wasHidden) positionPopover(plusMenuEl, $('#btn-plus'));
+  });
+
+  $('#btn-mode-menu').addEventListener('click', (e) => {
+    e.stopPropagation();
+    const wasHidden = modeMenuEl.classList.contains('hidden');
+    closePopovers();
+    if (wasHidden) positionPopover(modeMenuEl, $('#btn-mode-menu'));
+  });
+
+  document.addEventListener('click', closePopovers);
+
+  plusMenuEl.querySelectorAll<HTMLButtonElement>('[data-plus]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const action = btn.dataset.plus;
+      if (action === 'browse') {
+        drawerEl.classList.remove('collapsed');
+        $('#btn-toggle-drawer').classList.add('active');
+      } else if (action === 'new-docx') void createOfficeDocument('docx');
+      else if (action === 'new-xlsx') void createOfficeDocument('xlsx');
+      else if (action === 'new-pptx') void createOfficeDocument('pptx');
+    });
+  });
+
+  $('#welcome-new-docx').addEventListener('click', () => void createOfficeDocument('docx'));
+  $('#welcome-new-xlsx').addEventListener('click', () => void createOfficeDocument('xlsx'));
+  $('#welcome-new-pptx').addEventListener('click', () => void createOfficeDocument('pptx'));
+
+  modeMenuEl.querySelectorAll<HTMLButtonElement>('[data-mode]').forEach((btn) => {
+    btn.addEventListener('click', () => void switchActiveMode(btn.dataset.mode as OfficeViewMode));
+  });
+
+  modeMenuEl.querySelectorAll<HTMLButtonElement>('[data-zoom]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const z = btn.dataset.zoom!;
+      const zoomVal: 'fit' | number = z === 'fit' ? 'fit' : Number(z);
+      fitModeFlag = zoomVal === 'fit';
+      activeDocxCtrl?.setZoom(zoomVal);
+    });
+  });
+
+  $('#menu-bookmark').addEventListener('click', () => {
+    const tab = activeTab();
+    if (!tab?.path) return;
+    if (isBookmarked(tab.path)) {
+      state.bookmarks = state.bookmarks.filter((b) => b.path.toLowerCase() !== tab.path!.toLowerCase());
+      showToast('已取消收藏');
+    } else {
+      state.bookmarks = [{ path: tab.path, name: tab.name, kind: tab.kind, addedAt: Date.now() }, ...state.bookmarks];
+      showToast('已加入收藏');
+    }
+    renderHistory();
+    scheduleSaveState({ bookmarks: state.bookmarks });
+  });
+
+  $('#menu-native-tab').addEventListener('click', async () => {
+    const tab = activeTab();
+    if (!tab?.path) return;
+    const ok = await mcp.openInNativeFileView(tab.path);
+    if (!ok) showToast('当前视图不支持打开原生文件标签页');
+  });
+
+  $('#wt-compare-btn').addEventListener('click', () => void switchActiveMode('compare'));
+  $('#wt-approve-btn').addEventListener('click', () => void handleWorktreeApprove());
+  $('#wt-discard-btn').addEventListener('click', () => void handleWorktreeDiscard());
 
   document.querySelectorAll<HTMLButtonElement>('.drawer-tab').forEach((btn) => {
     btn.addEventListener('click', () => {
       const target = btn.dataset.drawer!;
       document.querySelectorAll('.drawer-tab').forEach((b) => b.classList.toggle('active', b === btn));
-      document.querySelectorAll('.drawer-pane').forEach((p) => p.classList.toggle('active', p.id === `drawer-${target}`));
+      document.querySelectorAll('.drawer-pane').forEach((p) => {
+        if (p.id.startsWith('drawer-')) p.classList.toggle('active', p.id === `drawer-${target}`);
+      });
+    });
+  });
+
+  document.querySelectorAll<HTMLButtonElement>('.right-tab').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const target = btn.dataset.right!;
+      document.querySelectorAll('.right-tab').forEach((b) => b.classList.toggle('active', b === btn));
+      document.querySelectorAll('#right-drawer .drawer-pane').forEach((p) => {
+        p.classList.toggle('active', p.id === `right-${target}`);
+      });
     });
   });
 
@@ -597,11 +933,8 @@ function wireEvents() {
     chip.addEventListener('click', () => {
       activeFilter = chip.dataset.filter || 'all';
       document.querySelectorAll('#kind-chips .chip').forEach((c) => c.classList.toggle('active', c === chip));
-      if (activeFilter === 'all' && !searchQuery.trim() && currentDir) {
-        void navigateDir(currentDir);
-      } else {
-        void runRecursiveSearch();
-      }
+      if (activeFilter === 'all' && !searchQuery.trim() && currentDir) void navigateDir(currentDir);
+      else void runRecursiveSearch();
     });
   });
 
@@ -610,51 +943,19 @@ function wireEvents() {
     searchQuery = (e.target as HTMLInputElement).value;
     window.clearTimeout(searchDebounce);
     searchDebounce = window.setTimeout(() => {
-      if (!searchQuery.trim() && activeFilter === 'all' && currentDir) {
-        void navigateDir(currentDir);
-      } else {
-        void runRecursiveSearch();
-      }
+      if (!searchQuery.trim() && activeFilter === 'all' && currentDir) void navigateDir(currentDir);
+      else void runRecursiveSearch();
     }, 260);
   });
 
-  const openFromPathInput = () => {
-    const val = pathInputEl.value.trim();
-    if (val) void openDiskFile(val);
-  };
-  $('#btn-open-path').addEventListener('click', openFromPathInput);
   pathInputEl.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') openFromPathInput();
-  });
-
-  bookmarkBtn.addEventListener('click', () => {
-    const tab = activeTab();
-    if (!tab?.path) return;
-    if (isBookmarked(tab.path)) {
-      state.bookmarks = state.bookmarks.filter((b) => b.path.toLowerCase() !== tab.path!.toLowerCase());
-      showToast('已取消收藏');
-    } else {
-      state.bookmarks = [
-        { path: tab.path, name: tab.name, kind: tab.kind, addedAt: Date.now() },
-        ...state.bookmarks,
-      ];
-      showToast('已加入收藏');
-    }
-    renderTabs();
-    renderHistory();
-    scheduleSaveState({ bookmarks: state.bookmarks });
-  });
-
-  nativeTabBtn.addEventListener('click', async () => {
-    const tab = activeTab();
-    if (!tab?.path) return;
-    const ok = await mcp.openInNativeFileView(tab.path);
-    if (!ok) {
-      showToast('当前视图不支持打开原生文件标签页');
+    if (e.key === 'Enter') {
+      const val = pathInputEl.value.trim();
+      if (val) void openDiskFile(val);
     }
   });
 
-  attachCtxBtn.addEventListener('click', async () => {
+  $('#btn-attach-ctx').addEventListener('click', async () => {
     try {
       const ctx = await buildContextPayload();
       if (!ctx) return;
@@ -665,12 +966,26 @@ function wireEvents() {
     }
   });
 
-  askAgentBtn.addEventListener('click', async () => {
+  $('#btn-ask-agent').addEventListener('click', async () => {
     const tab = activeTab();
     if (!tab) return;
     try {
       const ctx = await buildContextPayload();
-      await mcp.sendMessage(`请总结并解释我当前正在查看的文档内容（${tab.name}）。`, ctx);
+      await mcp.sendMessage(`请总结并分析我当前正在查看的文档（${tab.name}）。`, ctx);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err));
+    }
+  });
+
+  $('#btn-ask-review').addEventListener('click', async () => {
+    const tab = activeTab();
+    if (!tab) return;
+    try {
+      const ctx = await buildContextPayload();
+      await mcp.sendMessage(
+        `请检查当前文档（${tab.name}）的排版结构、内容完整性和错别字，并给出可直接通过 office_edit 工具修改的建议。`,
+        ctx,
+      );
     } catch (err) {
       showToast(err instanceof Error ? err.message : String(err));
     }
@@ -692,7 +1007,7 @@ function wireEvents() {
     try {
       const ctx = await buildContextPayload();
       selectionBarEl.classList.add('hidden');
-      await mcp.sendMessage(`请解释我在 ${tab?.name || '文档'} 中选中的这段内容：`, ctx);
+      await mcp.sendMessage(`请解释或润色我在 ${tab?.name || '文档'} 中选中的这段内容：`, ctx);
     } catch (err) {
       showToast(err instanceof Error ? err.message : String(err));
     }
@@ -737,11 +1052,7 @@ function wireEvents() {
 }
 
 async function bootstrap() {
-  if (window.innerWidth <= 600) {
-    drawerEl.classList.add('collapsed');
-  }
   wireEvents();
-
   let handledInitialToolResult = false;
 
   await mcp.connect({
@@ -775,9 +1086,6 @@ async function bootstrap() {
           page: typeof payload.initialPage === 'number' ? payload.initialPage : undefined,
           sheet: typeof payload.initialSheet === 'string' ? payload.initialSheet : undefined,
         });
-        if (window.innerWidth <= 600) {
-          drawerEl.classList.add('collapsed');
-        }
       }
     },
     onToolCancelled(reason) {
@@ -787,7 +1095,6 @@ async function bootstrap() {
 
   updateCapabilitiesUi();
 
-  // Fallback if launched cleanly without tool result payload yet
   window.setTimeout(async () => {
     if (handledInitialToolResult) return;
     try {
@@ -795,8 +1102,12 @@ async function bootstrap() {
       state = stRes.state;
       renderHistory();
       await navigateDir(state.lastRootDir || '.');
+      if (!activeTabId) {
+        drawerEl.classList.remove('collapsed');
+        $('#btn-toggle-drawer').classList.add('active');
+      }
     } catch {
-      // Ignore standalone preview errors outside MCP host
+      // Ignore standalone preview outside MCP host
     }
   }, 250);
 }

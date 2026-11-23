@@ -1,8 +1,8 @@
 {
   "name": "doc-viewer",
   "displayName": "Doc & PDF Viewer",
-  "version": "1.0.0",
-  "description": "Offline sidebar viewer for PDF (with CJK support), Markdown, Word (.docx), Excel/CSV, local HTML, images, and syntax-highlighted code.",
+  "version": "1.1.0",
+  "description": "Offline Antigravity Office & Document sidebar workbench: true A4 paginated Word (.docx), interactive Excel/CSV, PowerPoint (.pptx), PDF (CJK), Markdown, local HTML, plus isolated draft worktrees and diff review.",
   "logo": "assets/logo.svg",
   "author": {
     "name": "zeng-kaifeng",
@@ -11,8 +11,8 @@
   "repository": "https://github.com/Johnsonfreee/antigravity-doc-viewer",
   "homepage": "https://github.com/Johnsonfreee/antigravity-doc-viewer",
   "suggestedPrompts": [
-    "在侧边栏打开文档查看器，浏览当前工作区的 PDF 和文档",
-    "用侧边栏打开这个项目里的 README.md 或 Word/Excel 文件",
-    "列出当前目录下的所有 PDF、Word、Excel 和 Markdown 文档"
+    "在侧边栏用仿真纸张视图打开当前项目的 Word / PDF / Excel 文档",
+    "检查并修改这份 .docx 实验报告的内容，然后在侧边栏对比审核变更",
+    "新建一份 Excel 报表或 PPT 演示文稿，并在侧边栏实时预览编辑"
   ]
 }

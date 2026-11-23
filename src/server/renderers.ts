@@ -290,12 +290,14 @@ export async function renderSpreadsheet(
     page?: number;
     pageSize?: number;
     search?: string;
+    bufferOverride?: Buffer;
   } = {},
 ): Promise<{
   sheetNames: string[];
   activeSheet: string;
   columns: string[];
   rows: Array<{ rowNumber: number; cells: string[] }>;
+  formulas: Record<string, string>;
   totalRows: number;
   filteredRows: number;
   totalCols: number;
@@ -308,7 +310,9 @@ export async function renderSpreadsheet(
 
   let workbook: XLSX.WorkBook;
   if (ext === '.csv' || ext === '.tsv') {
-    let text = await fs.readFile(filePath, 'utf-8');
+    let text = options.bufferOverride
+      ? options.bufferOverride.toString('utf-8')
+      : await fs.readFile(filePath, 'utf-8');
     if (text.charCodeAt(0) === 0xfeff) {
       text = text.slice(1);
     }
@@ -316,6 +320,12 @@ export async function renderSpreadsheet(
       type: 'string',
       FS: ext === '.tsv' ? '\t' : undefined,
       raw: false,
+    });
+  } else if (options.bufferOverride) {
+    workbook = XLSX.read(options.bufferOverride, {
+      type: 'buffer',
+      codepage: 65001,
+      cellDates: true,
     });
   } else {
     workbook = XLSX.readFile(filePath, {
@@ -331,6 +341,7 @@ export async function renderSpreadsheet(
       activeSheet: '',
       columns: [],
       rows: [],
+      formulas: {},
       totalRows: 0,
       filteredRows: 0,
       totalCols: 0,
@@ -388,11 +399,23 @@ export async function renderSpreadsheet(
   const start = (page - 1) * pageSize;
   const rows = indexedRows.slice(start, start + pageSize);
 
+  const formulas: Record<string, string> = {};
+  for (const row of rows) {
+    for (let c = 0; c < totalCols; c++) {
+      const addr = XLSX.utils.encode_cell({ r: row.rowNumber - 1, c });
+      const cellObj = sheet[addr] as XLSX.CellObject | undefined;
+      if (cellObj?.f) {
+        formulas[addr] = `=${cellObj.f}`;
+      }
+    }
+  }
+
   return {
     sheetNames,
     activeSheet,
     columns,
     rows,
+    formulas,
     totalRows: rawMatrix.length,
     filteredRows: indexedRows.length,
     totalCols,

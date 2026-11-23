@@ -1,78 +1,120 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Doc &amp; PDF Viewer</title>
+  <title>Doc &amp; Office Workbench</title>
 </head>
 <body>
   <div id="app" class="app-shell">
-    <!-- Top Header / Tabs / Quick Controls -->
-    <header class="topbar">
-      <div class="topbar-row">
-        <button id="btn-toggle-drawer" class="icon-btn" title="切换侧栏文件树 / 大纲" aria-label="切换侧栏">
-          <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2.5" width="12" height="11" rx="1.5"/><path d="M6 2.5v11"/></svg>
+    <!-- Row 1: Tab strip + Plus menu + 3 right layout toggles (matches screenshot) -->
+    <header class="chrome-header">
+      <div class="chrome-row-tabs">
+        <div id="tabs-strip" class="tabs-strip" role="tablist" aria-label="已打开文档"></div>
+        <button id="btn-plus" class="chrome-icon-btn" title="打开或新建 Office 文档" aria-label="新建或打开">
+          <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 3v10M3 8h10"/></svg>
         </button>
 
-        <div id="tabs-strip" class="tabs-strip" role="tablist" aria-label="已打开文档"></div>
-
-        <div class="topbar-actions">
-          <label class="icon-btn file-pick-btn" title="选择本地文件预览">
-            <input id="file-picker" type="file" hidden accept=".pdf,.md,.markdown,.mdx,.txt,.csv,.tsv,.html,.htm,.json,.yaml,.yml,.xml,.js,.ts,.py,.png,.jpg,.jpeg,.gif,.webp,.svg" />
-            <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 10V3m0 0L5.5 5.5M8 3l2.5 2.5M2.5 11v1.5A1.5 1.5 0 004 14h8a1.5 1.5 0 001.5-1.5V11"/></svg>
-          </label>
-          <button id="btn-bookmark" class="icon-btn" title="收藏/取消收藏当前文件" aria-label="收藏文件" disabled>
-            <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 1.8l1.9 3.85 4.25.62-3.08 3 .73 4.23L8 11.5l-3.8 2 .73-4.23-3.08-3 4.25-.62L8 1.8z"/></svg>
+        <div class="chrome-right-controls">
+          <button id="btn-toggle-drawer" class="chrome-icon-btn" title="切换左侧文件与大纲栏" aria-label="切换左侧栏">
+            <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2" y="2.5" width="12" height="11" rx="1.5"/><path d="M6 2.5v11"/></svg>
           </button>
-          <button id="btn-native-tab" class="icon-btn" title="在原生文件标签页中打开" aria-label="原生标签打开" disabled>
-            <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M6.5 3.5H3.5A1.5 1.5 0 002 5v7.5A1.5 1.5 0 003.5 14H11a1.5 1.5 0 001.5-1.5v-3M9 2h5v5M14 2L7.5 8.5"/></svg>
+          <button id="btn-toggle-fit" class="chrome-icon-btn" title="切换适应宽度 / 原始比例" aria-label="适应视图">
+            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 6V2.5H6M10 2.5h3.5V6M13.5 10v3.5H10M6 13.5H2.5V10"/></svg>
           </button>
-          <button id="btn-attach-ctx" class="pill-btn hidden" title="将当前选区或页内容挂载为下一次对话上下文">引用到对话</button>
-          <button id="btn-ask-agent" class="pill-btn accent hidden" title="让 Agent 总结或解释当前内容">问 Agent</button>
+          <button id="btn-toggle-right" class="chrome-icon-btn" title="切换右侧 Office 审阅与 AI 面板" aria-label="切换右侧面板">
+            <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2" y="2.5" width="12" height="11" rx="1.5"/><path d="M10 2.5v11"/></svg>
+            <span id="right-draft-dot" class="nav-dot hidden"></span>
+          </button>
         </div>
       </div>
 
-      <div class="pathbar">
-        <input id="path-input" class="path-input" type="text" placeholder="输入绝对或工作区相对路径，如 docs/spec.pdf，按 Enter 打开…" spellcheck="false" />
-        <button id="btn-open-path" class="btn-sm primary">打开</button>
+      <!-- Row 2: Address bar + Refresh + Mode Dropdown [W ▾] + Folder button -->
+      <div class="chrome-row-address">
+        <input id="path-input" class="address-input" type="text" placeholder="输入文件路径（支持 .docx / .xlsx / .csv / .pptx / .pdf / .md / .html）按 Enter 打开…" spellcheck="false" />
+        <div class="address-actions">
+          <button id="btn-refresh" class="chrome-icon-btn" title="重新加载当前文档" aria-label="刷新">
+            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M13.5 8a5.5 5.5 0 11-1.35-3.6M13.5 2.5v2.8h-2.8"/></svg>
+          </button>
+          <button id="btn-mode-menu" class="mode-badge-btn" title="切换视图 / 编辑 / Worktree 对比 / 缩放">
+            <span id="mode-app-badge" class="app-badge w">W</span>
+            <svg viewBox="0 0 12 12" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 4.5l3 3 3-3"/></svg>
+          </button>
+          <button id="btn-folder-browse" class="chrome-icon-btn" title="浏览工作区文件" aria-label="浏览文件夹">
+            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 4.2A1.2 1.2 0 013.2 3h2.9l1.2 1.4h5.5A1.2 1.2 0 0114 5.6v6.2a1.2 1.2 0 01-1.2 1.2H3.2A1.2 1.2 0 012 11.8V4.2z"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- Worktree Review Banner (appears only when active draft exists) -->
+      <div id="worktree-banner" class="worktree-banner hidden">
+        <span id="worktree-banner-text" class="worktree-banner-text">Worktree 草稿待审核</span>
+        <div class="worktree-banner-actions">
+          <button id="wt-compare-btn" class="btn-sm">对比差异</button>
+          <button id="wt-approve-btn" class="btn-sm primary">合并保存到磁盘</button>
+          <button id="wt-discard-btn" class="btn-sm danger">丢弃草稿</button>
+        </div>
       </div>
     </header>
 
-    <!-- Main Body: Collapsible Left Drawer + Active Document Canvas -->
+    <!-- Dropdown Popovers -->
+    <div id="plus-menu" class="popover-menu hidden">
+      <button class="menu-item" data-plus="browse">浏览工作区目录…</button>
+      <button class="menu-item" data-plus="new-docx">新建 Word 文档 (.docx)</button>
+      <button class="menu-item" data-plus="new-xlsx">新建 Excel 表格 (.xlsx)</button>
+      <button class="menu-item" data-plus="new-pptx">新建 PPT 演示 (.pptx)</button>
+      <label class="menu-item file-menu-item">
+        从电脑选择本地文件…
+        <input id="file-picker" type="file" hidden accept=".docx,.xlsx,.xls,.csv,.tsv,.pptx,.pdf,.md,.markdown,.mdx,.txt,.html,.htm,.json,.yaml,.yml,.xml,.js,.ts,.py,.png,.jpg,.jpeg,.gif,.webp,.svg" />
+      </label>
+    </div>
+
+    <div id="mode-menu" class="popover-menu hidden">
+      <button class="menu-item" data-mode="print">仿真纸张 / 阅读视图</button>
+      <button class="menu-item" data-mode="edit">交互编辑模式</button>
+      <button class="menu-item" data-mode="compare">Worktree 变更对比</button>
+      <div class="menu-sep"></div>
+      <button class="menu-item" data-zoom="fit">缩放：适应侧栏宽度</button>
+      <button class="menu-item" data-zoom="0.75">缩放：75%</button>
+      <button class="menu-item" data-zoom="1">缩放：100%</button>
+      <button class="menu-item" data-zoom="1.25">缩放：125%</button>
+      <div class="menu-sep"></div>
+      <button class="menu-item" id="menu-bookmark">收藏 / 取消收藏当前文件</button>
+      <button class="menu-item" id="menu-native-tab">在原生文件标签页打开</button>
+    </div>
+
+    <!-- Main Body -->
     <div class="workspace">
-      <aside id="drawer" class="drawer">
+      <!-- Left File / Outline / History Drawer (collapsed initially for clean screenshot feel) -->
+      <aside id="drawer" class="drawer collapsed">
         <div class="drawer-tabs" role="tablist">
           <button class="drawer-tab active" data-drawer="files">文件</button>
           <button class="drawer-tab" data-drawer="outline">大纲</button>
           <button class="drawer-tab" data-drawer="history">最近/收藏</button>
         </div>
 
-        <!-- Files panel -->
         <div id="drawer-files" class="drawer-pane active">
           <div class="quick-roots" id="quick-roots"></div>
           <div class="filter-bar">
             <input id="file-search-input" class="search-input" type="search" placeholder="搜索文件名或当前目录…" />
             <div id="kind-chips" class="chips">
               <button class="chip active" data-filter="all">全部</button>
+              <button class="chip" data-filter="office">Office</button>
               <button class="chip" data-filter="pdf">PDF</button>
-              <button class="chip" data-filter="docs">Doc/MD</button>
-              <button class="chip" data-filter="sheet">表格</button>
+              <button class="chip" data-filter="docs">MD/TXT</button>
               <button class="chip" data-filter="html">HTML</button>
-              <button class="chip" data-filter="code">代码</button>
             </div>
           </div>
           <div id="breadcrumbs" class="breadcrumbs"></div>
           <div id="file-list" class="file-list"></div>
         </div>
 
-        <!-- Outline panel -->
         <div id="drawer-outline" class="drawer-pane">
           <div id="outline-list" class="outline-list">
-            <div class="empty-hint">打开 PDF、Markdown 或 Word 文档后显示目录大纲</div>
+            <div class="empty-hint">打开 Word、PDF、PPT 或 Markdown 后显示目录大纲</div>
           </div>
         </div>
 
-        <!-- Recent / Bookmarks panel -->
         <div id="drawer-history" class="drawer-pane">
           <div class="section-title">收藏夹</div>
           <div id="bookmarks-list" class="file-list compact"></div>
@@ -81,19 +123,45 @@
         </div>
       </aside>
 
+      <!-- Main Office Canvas (#141414) -->
       <main id="viewer-stage" class="viewer-stage">
         <div id="viewer-welcome" class="welcome">
           <div class="welcome-card">
-            <h2>Doc &amp; PDF Viewer</h2>
-            <p>支持离线在侧边栏直接阅读 <strong>PDF（含中文 CJK）</strong>、<strong>Markdown</strong>、<strong>Word (.docx)</strong>、<strong>Excel / CSV</strong>、<strong>本地 HTML</strong>、图片与代码文件。</p>
-            <div class="welcome-tips">
-              <div>• 从左侧文件树点击打开，或直接把本地文件拖入此窗口</div>
-              <div>• 在 PDF / 文档中划选文字后，可点击右上角 <strong>引用到对话</strong> 或 <strong>问 Agent</strong></div>
+            <h2>Doc &amp; Office Workbench</h2>
+            <p>仿桌面级真实办公环境：支持 <strong>Word (.docx) 真实 A4 分页与原样式编辑</strong>、<strong>Excel / CSV 公式表格</strong>、<strong>PPT 幻灯片</strong>、<strong>PDF (CJK)</strong>、<strong>Markdown</strong> 与 <strong>本地 HTML</strong>。</p>
+            <div class="welcome-actions">
+              <button id="welcome-browse" class="btn-sm primary">浏览工作区文件</button>
+              <button id="welcome-new-docx" class="btn-sm">新建 Word</button>
+              <button id="welcome-new-xlsx" class="btn-sm">新建 Excel</button>
+              <button id="welcome-new-pptx" class="btn-sm">新建 PPT</button>
             </div>
           </div>
         </div>
         <div id="viewer-content" class="viewer-content hidden"></div>
       </main>
+
+      <!-- Collapsible Right Office Worktree & AI Review Drawer -->
+      <aside id="right-drawer" class="right-drawer collapsed">
+        <div class="drawer-tabs">
+          <button class="right-tab active" data-right="worktree">Worktree &amp; 版本</button>
+          <button class="right-tab" data-right="ai">AI 审阅助手</button>
+        </div>
+        <div id="right-worktree" class="drawer-pane active">
+          <div id="worktree-panel-body" class="right-panel-scroll">
+            <div class="empty-hint">打开 Office 文档后可查看草稿差异与历史版本</div>
+          </div>
+        </div>
+        <div id="right-ai" class="drawer-pane">
+          <div class="right-panel-scroll">
+            <div class="ai-panel-actions">
+              <button id="btn-attach-ctx" class="btn-sm hidden">将当前内容/选区引用到对话</button>
+              <button id="btn-ask-agent" class="btn-sm primary hidden">让 Agent 总结当前文档</button>
+              <button id="btn-ask-review" class="btn-sm hidden">让 Agent 检查格式与错别字</button>
+            </div>
+            <div id="ai-cap-hint" class="empty-hint">选择文本或点击按钮可与当前对话中的 Agent 联动。</div>
+          </div>
+        </div>
+      </aside>
     </div>
 
     <!-- Floating Selection Bar & Toast & Drop Overlay -->
@@ -104,7 +172,7 @@
     </div>
 
     <div id="drop-overlay" class="drop-overlay hidden">
-      <div class="drop-box">松开即可预览文件（PDF / MD / HTML / CSV / 图片 / 代码）</div>
+      <div class="drop-box">松开即可预览本地文档（Word / PDF / Markdown / HTML / CSV / 图片）</div>
     </div>
 
     <div id="toast" class="toast hidden"></div>

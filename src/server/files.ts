@@ -9,6 +9,7 @@ export type DocKind =
   | 'docx'
   | 'legacy_doc'
   | 'spreadsheet'
+  | 'slides'
   | 'html'
   | 'image'
   | 'code'
@@ -70,6 +71,7 @@ const EXT_KIND_MAP: Record<string, DocKind> = {
   '.ods': 'spreadsheet',
   '.csv': 'spreadsheet',
   '.tsv': 'spreadsheet',
+  '.pptx': 'slides',
   '.html': 'html',
   '.htm': 'html',
   '.xhtml': 'html',
@@ -133,7 +135,7 @@ const BINARY_EXTS = new Set([
 
 export const DOCUMENT_EXTS = new Set([
   '.pdf', '.md', '.markdown', '.mdx', '.docx', '.xlsx', '.xls', '.xlsm',
-  '.xlsb', '.ods', '.csv', '.tsv', '.html', '.htm', '.txt', '.json', '.yaml', '.yml',
+  '.xlsb', '.ods', '.csv', '.tsv', '.pptx', '.html', '.htm', '.txt', '.json', '.yaml', '.yml',
 ]);
 
 export function classifyFile(filePath: string): DocKind {

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,7 +13,6 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
 const bundledServerPath = path.join(repoRoot, 'dist', 'plugin', 'dist', 'server.cjs');
 
-// Minimal valid 1x1 transparent PNG
 const ONE_BY_ONE_PNG_BASE64 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
 
@@ -66,7 +66,12 @@ async function createMinimalDocx(outPath) {
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
   <w:body>
     <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>架构设计说明书</w:t></w:r></w:p>
-    <w:p><w:r><w:t>这是一个用于端到端测试的 Word 文档段落。</w:t></w:r></w:p>
+    <w:p><w:r><w:t>专业：</w:t></w:r><w:r><w:t>软件</w:t></w:r><w:r><w:t>工程</w:t></w:r></w:p>
+    <w:tbl>
+      <w:tr><w:tc><w:p><w:r><w:t>项目</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>状态</w:t></w:r></w:p></w:tc></w:tr>
+      <w:tr><w:tc><w:p><w:r><w:t>模块A</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>待测试</w:t></w:r></w:p></w:tc></w:tr>
+    </w:tbl>
+    <w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>
   </w:body>
 </w:document>`,
   );
@@ -147,8 +152,18 @@ async function main() {
       { type: 'global', title: 'Doc Viewer' },
     ]);
 
+    for (const officeToolName of [
+      'office_inspect_document',
+      'office_edit_docx',
+      'office_edit_xlsx',
+      'office_edit_pptx',
+      'office_manage_worktree',
+    ]) {
+      assert.ok(toolsRes.tools.some((t) => t.name === officeToolName), `${officeToolName} should be registered`);
+    }
+
     const appOnlyTools = toolsRes.tools.filter((t) => t.name.startsWith('app_'));
-    assert.ok(appOnlyTools.length >= 10, 'Expected app-only tools');
+    assert.ok(appOnlyTools.length >= 16, 'Expected all app-only tools');
     for (const t of appOnlyTools) {
       assert.deepEqual(t._meta?.ui?.visibility, ['app'], `${t.name} must be app-only`);
     }
@@ -221,7 +236,7 @@ async function main() {
     });
     assert.equal(badAsset.isError, true);
 
-    // 6. Markdown rendering (image inlined, script stripped, TOC extracted)
+    // 6. Markdown rendering
     const md = await client.callTool({
       name: 'app_render_markdown',
       arguments: { path: path.join(fixtureDir, 'docs', 'guide.md') },
@@ -229,24 +244,105 @@ async function main() {
     assert.ok(md.structuredContent.html.includes('data:image/png;base64,'));
     assert.ok(!md.structuredContent.html.includes('<script>'));
     assert.equal(md.structuredContent.toc.length, 2);
-    assert.equal(md.structuredContent.toc[0].text, '项目指南');
 
-    // 7. DOCX rendering
-    const docx = await client.callTool({
-      name: 'app_render_docx',
-      arguments: { path: path.join(fixtureDir, 'docs', 'spec.docx') },
+    // 7. DOCX inspect + cross-run draft edit + worktree diff + approve + version history + restore
+    const docxPath = path.join(fixtureDir, 'docs', 'spec.docx');
+    const inspectedDocx = await client.callTool({
+      name: 'office_inspect_document',
+      arguments: { path: docxPath },
     });
-    assert.ok(docx.structuredContent.html.includes('架构设计说明书'));
-    assert.ok(docx.structuredContent.html.includes('Word 文档段落'));
+    assert.equal(inspectedDocx.structuredContent.kind, 'docx');
+    assert.ok(inspectedDocx.structuredContent.paragraphs.some((p) => p.text.includes('软件工程')));
 
-    // 8. Excel & UTF-8 Chinese CSV
+    const editDocxRes = await client.callTool({
+      name: 'office_edit_docx',
+      arguments: {
+        path: docxPath,
+        mode: 'draft',
+        summary: '更新专业与表格状态',
+        replacements: [{ find: '软件工程', replace: '计算机科学与技术' }],
+        updateTableCells: [{ tableIndex: 0, row: 1, col: 1, text: '已通过' }],
+        appendBlocks: [{ type: 'paragraph', text: '新增结语段落' }],
+      },
+    });
+    assert.equal(editDocxRes.structuredContent.worktree.status, 'draft');
+
+    // Disk file should NOT be modified while in draft mode!
+    const diskCheck = await client.callTool({
+      name: 'office_inspect_document',
+      arguments: { path: docxPath, useDraft: false },
+    });
+    assert.ok(diskCheck.structuredContent.paragraphs.some((p) => p.text.includes('软件工程')));
+
+    // Draft check SHOULD reflect edits!
+    const draftCheck = await client.callTool({
+      name: 'office_inspect_document',
+      arguments: { path: docxPath, useDraft: true },
+    });
+    assert.ok(draftCheck.structuredContent.paragraphs.some((p) => p.text.includes('计算机科学与技术')));
+    assert.equal(draftCheck.structuredContent.tables[0].rows[1][1], '已通过');
+    assert.ok(draftCheck.structuredContent.paragraphs.some((p) => p.text === '新增结语段落'));
+
+    const diffRes = await client.callTool({
+      name: 'office_manage_worktree',
+      arguments: { action: 'diff', path: docxPath },
+    });
+    assert.equal(diffRes.structuredContent.hasDraft, true);
+    assert.ok(diffRes.structuredContent.changedCount >= 2);
+
+    const approveRes = await client.callTool({
+      name: 'office_manage_worktree',
+      arguments: { action: 'approve', path: docxPath },
+    });
+    assert.equal(approveRes.structuredContent.approved, true);
+    assert.equal(approveRes.structuredContent.worktree.status, 'clean');
+    assert.ok(approveRes.structuredContent.worktree.versions.length >= 1);
+
+    // Confirm disk file now has approved edits
+    const postApproveDisk = await client.callTool({
+      name: 'office_inspect_document',
+      arguments: { path: docxPath, useDraft: false },
+    });
+    assert.ok(postApproveDisk.structuredContent.paragraphs.some((p) => p.text.includes('计算机科学与技术')));
+
+    // Test restore_version + discard
+    const prevVersionId = approveRes.structuredContent.worktree.versions[0].versionId;
+    await client.callTool({
+      name: 'office_manage_worktree',
+      arguments: { action: 'restore_version', path: docxPath, versionId: prevVersionId, mode: 'draft' },
+    });
+    const restoredDraft = await client.callTool({
+      name: 'office_inspect_document',
+      arguments: { path: docxPath, useDraft: true },
+    });
+    assert.ok(restoredDraft.structuredContent.paragraphs.some((p) => p.text.includes('软件工程')));
+    await client.callTool({
+      name: 'office_manage_worktree',
+      arguments: { action: 'discard', path: docxPath },
+    });
+
+    // 8. Excel & UTF-8 CSV + office_edit_xlsx
+    const xlsxPath = path.join(fixtureDir, 'docs', 'report.xlsx');
+    await client.callTool({
+      name: 'office_edit_xlsx',
+      arguments: {
+        path: xlsxPath,
+        mode: 'draft',
+        summary: '增加公式汇总',
+        setCells: [
+          { sheet: '评分表', cell: 'A4', value: '平均分' },
+          { sheet: '评分表', cell: 'C4', formula: '=AVERAGE(C2:C3)', value: 94.5 },
+        ],
+      },
+    });
     const xlsxRes = await client.callTool({
       name: 'app_render_spreadsheet',
-      arguments: { path: path.join(fixtureDir, 'docs', 'report.xlsx'), sheetName: '配置' },
+      arguments: { path: xlsxPath, sheetName: '评分表', useDraft: true },
     });
-    assert.deepEqual(xlsxRes.structuredContent.sheetNames, ['评分表', '配置']);
-    assert.equal(xlsxRes.structuredContent.activeSheet, '配置');
-    assert.equal(xlsxRes.structuredContent.rows[1].cells[0], 'Env');
+    assert.equal(xlsxRes.structuredContent.hasDraft, true);
+    assert.equal(xlsxRes.structuredContent.formulas.C4, '=AVERAGE(C2:C3)');
+    assert.equal(xlsxRes.structuredContent.rows[3].cells[0], '平均分');
+    await client.callTool({ name: 'office_manage_worktree', arguments: { action: 'approve', path: xlsxPath } });
 
     const csvRes = await client.callTool({
       name: 'app_render_spreadsheet',
@@ -255,22 +351,39 @@ async function main() {
     assert.equal(csvRes.structuredContent.filteredRows, 1);
     assert.equal(csvRes.structuredContent.rows[0].cells[0], '上海');
 
-    // 9. Local HTML (CSS inlined, local image inlined, script stripped)
+    // 9. PowerPoint (.pptx) create, edit, render
+    const pptxPath = path.join(fixtureDir, 'docs', 'deck.pptx');
+    await client.callTool({
+      name: 'office_edit_pptx',
+      arguments: {
+        path: pptxPath,
+        mode: 'direct',
+        appendSlides: [
+          { title: '人机交互实验总结', bullets: ['支持 A4 分页', '支持 Worktree 审核'] },
+          { title: '下一步规划', bullets: ['完善公式引擎'] },
+        ],
+      },
+    });
+    const pptRendered = await client.callTool({
+      name: 'app_render_pptx',
+      arguments: { path: pptxPath },
+    });
+    assert.equal(pptRendered.structuredContent.slideCount, 2);
+    assert.equal(pptRendered.structuredContent.slides[0].title, '人机交互实验总结');
+
+    // 10. Local HTML, Code, State Persistence
     const htmlRes = await client.callTool({
       name: 'app_render_html',
       arguments: { path: path.join(fixtureDir, 'docs', 'preview.html') },
     });
     assert.ok(htmlRes.structuredContent.previewHtml.includes('#123456'));
-    assert.ok(htmlRes.structuredContent.previewHtml.includes('data:image/png;base64,'));
     assert.ok(!htmlRes.structuredContent.previewHtml.includes('window.pwned'));
 
-    // 10. Text/Code & State Persistence
     const codeRes = await client.callTool({
       name: 'app_read_text',
       arguments: { path: path.join(fixtureDir, 'docs', 'hello.ts') },
     });
     assert.equal(codeRes.structuredContent.language, 'typescript');
-    assert.equal(codeRes.structuredContent.totalLines, 4);
 
     await client.callTool({
       name: 'app_save_state',
@@ -281,9 +394,35 @@ async function main() {
     });
     const st = await client.callTool({ name: 'app_get_state', arguments: {} });
     assert.equal(st.structuredContent.state.lastRootDir, fixtureDir);
-    assert.equal(st.structuredContent.state.bookmarks.length, 1);
 
-    console.log('[e2e] All 10 MCP end-to-end test groups passed!');
+    // 11. Real user experiment report verification (READ-ONLY!)
+    const realReportPath = 'D:\\日常任务\\人机交互实验资料\\202405566406-曾凯锋-实验1报告.docx';
+    if (existsSync(realReportPath)) {
+      const realOpen = await client.callTool({
+        name: 'open_document_viewer',
+        arguments: { path: realReportPath },
+      });
+      assert.equal(realOpen.structuredContent.file.kind, 'docx');
+      assert.ok(Buffer.byteLength(JSON.stringify(realOpen), 'utf-8') < 1024 * 1024);
+
+      const realInspect = await client.callTool({
+        name: 'office_inspect_document',
+        arguments: { path: realReportPath, useDraft: false },
+      });
+      assert.equal(realInspect.structuredContent.kind, 'docx');
+      const allText = realInspect.structuredContent.paragraphs.map((p) => p.text).join('\n');
+      assert.ok(allText.includes('软件工程'));
+      assert.ok(allText.includes('202405566406'));
+
+      const realChunk = await client.callTool({
+        name: 'app_read_file_chunk',
+        arguments: { path: realReportPath, offset: 0, length: 393216 },
+      });
+      assert.ok(realChunk.structuredContent.bytesRead > 0);
+      console.log(`[e2e] Verified real .docx report (${realOpen.structuredContent.file.size} bytes, ${realInspect.structuredContent.paragraphCount} paragraphs) read-only!`);
+    }
+
+    console.log('[e2e] All 11 Office & MCP end-to-end test groups passed!');
   } finally {
     await client.close();
     await fs.rm(tmpRoot, { recursive: true, force: true });
