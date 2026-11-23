@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Doc &amp; PDF Viewer</title>
+</head>
+<body>
+  <div id="app" class="app-shell">
+    <!-- Top Header / Tabs / Quick Controls -->
+    <header class="topbar">
+      <div class="topbar-row">
+        <button id="btn-toggle-drawer" class="icon-btn" title="切换侧栏文件树 / 大纲" aria-label="切换侧栏">
+          <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2.5" width="12" height="11" rx="1.5"/><path d="M6 2.5v11"/></svg>
+        </button>
+
+        <div id="tabs-strip" class="tabs-strip" role="tablist" aria-label="已打开文档"></div>
+
+        <div class="topbar-actions">
+          <label class="icon-btn file-pick-btn" title="选择本地文件预览">
+            <input id="file-picker" type="file" hidden accept=".pdf,.md,.markdown,.mdx,.txt,.csv,.tsv,.html,.htm,.json,.yaml,.yml,.xml,.js,.ts,.py,.png,.jpg,.jpeg,.gif,.webp,.svg" />
+            <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 10V3m0 0L5.5 5.5M8 3l2.5 2.5M2.5 11v1.5A1.5 1.5 0 004 14h8a1.5 1.5 0 001.5-1.5V11"/></svg>
+          </label>
+          <button id="btn-bookmark" class="icon-btn" title="收藏/取消收藏当前文件" aria-label="收藏文件" disabled>
+            <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 1.8l1.9 3.85 4.25.62-3.08 3 .73 4.23L8 11.5l-3.8 2 .73-4.23-3.08-3 4.25-.62L8 1.8z"/></svg>
+          </button>
+          <button id="btn-native-tab" class="icon-btn" title="在原生文件标签页中打开" aria-label="原生标签打开" disabled>
+            <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M6.5 3.5H3.5A1.5 1.5 0 002 5v7.5A1.5 1.5 0 003.5 14H11a1.5 1.5 0 001.5-1.5v-3M9 2h5v5M14 2L7.5 8.5"/></svg>
+          </button>
+          <button id="btn-attach-ctx" class="pill-btn hidden" title="将当前选区或页内容挂载为下一次对话上下文">引用到对话</button>
+          <button id="btn-ask-agent" class="pill-btn accent hidden" title="让 Agent 总结或解释当前内容">问 Agent</button>
+        </div>
+      </div>
+
+      <div class="pathbar">
+        <input id="path-input" class="path-input" type="text" placeholder="输入绝对或工作区相对路径，如 docs/spec.pdf，按 Enter 打开…" spellcheck="false" />
+        <button id="btn-open-path" class="btn-sm primary">打开</button>
+      </div>
+    </header>
+
+    <!-- Main Body: Collapsible Left Drawer + Active Document Canvas -->
+    <div class="workspace">
+      <aside id="drawer" class="drawer">
+        <div class="drawer-tabs" role="tablist">
+          <button class="drawer-tab active" data-drawer="files">文件</button>
+          <button class="drawer-tab" data-drawer="outline">大纲</button>
+          <button class="drawer-tab" data-drawer="history">最近/收藏</button>
+        </div>
+
+        <!-- Files panel -->
+        <div id="drawer-files" class="drawer-pane active">
+          <div class="quick-roots" id="quick-roots"></div>
+          <div class="filter-bar">
+            <input id="file-search-input" class="search-input" type="search" placeholder="搜索文件名或当前目录…" />
+            <div id="kind-chips" class="chips">
+              <button class="chip active" data-filter="all">全部</button>
+              <button class="chip" data-filter="pdf">PDF</button>
+              <button class="chip" data-filter="docs">Doc/MD</button>
+              <button class="chip" data-filter="sheet">表格</button>
+              <button class="chip" data-filter="html">HTML</button>
+              <button class="chip" data-filter="code">代码</button>
+            </div>
+          </div>
+          <div id="breadcrumbs" class="breadcrumbs"></div>
+          <div id="file-list" class="file-list"></div>
+        </div>
+
+        <!-- Outline panel -->
+        <div id="drawer-outline" class="drawer-pane">
+          <div id="outline-list" class="outline-list">
+            <div class="empty-hint">打开 PDF、Markdown 或 Word 文档后显示目录大纲</div>
+          </div>
+        </div>
+
+        <!-- Recent / Bookmarks panel -->
+        <div id="drawer-history" class="drawer-pane">
+          <div class="section-title">收藏夹</div>
+          <div id="bookmarks-list" class="file-list compact"></div>
+          <div class="section-title">最近打开</div>
+          <div id="recent-list" class="file-list compact"></div>
+        </div>
+      </aside>
+
+      <main id="viewer-stage" class="viewer-stage">
+        <div id="viewer-welcome" class="welcome">
+          <div class="welcome-card">
+            <h2>Doc &amp; PDF Viewer</h2>
+            <p>支持离线在侧边栏直接阅读 <strong>PDF（含中文 CJK）</strong>、<strong>Markdown</strong>、<strong>Word (.docx)</strong>、<strong>Excel / CSV</strong>、<strong>本地 HTML</strong>、图片与代码文件。</p>
+            <div class="welcome-tips">
+              <div>• 从左侧文件树点击打开，或直接把本地文件拖入此窗口</div>
+              <div>• 在 PDF / 文档中划选文字后，可点击右上角 <strong>引用到对话</strong> 或 <strong>问 Agent</strong></div>
+            </div>
+          </div>
+        </div>
+        <div id="viewer-content" class="viewer-content hidden"></div>
+      </main>
+    </div>
+
+    <!-- Floating Selection Bar & Toast & Drop Overlay -->
+    <div id="selection-bar" class="selection-bar hidden">
+      <span id="selection-preview" class="selection-preview"></span>
+      <button id="sel-attach" class="btn-sm">引用到对话</button>
+      <button id="sel-ask" class="btn-sm primary">让 Agent 解释</button>
+    </div>
+
+    <div id="drop-overlay" class="drop-overlay hidden">
+      <div class="drop-box">松开即可预览文件（PDF / MD / HTML / CSV / 图片 / 代码）</div>
+    </div>
+
+    <div id="toast" class="toast hidden"></div>
+  </div>
+  <script type="module" src="/main.ts"></script>
+</body>
+</html>
