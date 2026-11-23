@@ -6,10 +6,10 @@
   "logo": "assets/logo.svg",
   "author": {
     "name": "zeng-kaifeng",
-    "url": "https://github.com/zeng-kaifeng"
+    "url": "https://github.com/Johnsonfreee"
   },
-  "repository": "https://github.com/zeng-kaifeng/antigravity-doc-viewer",
-  "homepage": "https://github.com/zeng-kaifeng/antigravity-doc-viewer",
+  "repository": "https://github.com/Johnsonfreee/antigravity-doc-viewer",
+  "homepage": "https://github.com/Johnsonfreee/antigravity-doc-viewer",
   "suggestedPrompts": [
     "在侧边栏打开文档查看器，浏览当前工作区的 PDF 和文档",
     "用侧边栏打开这个项目里的 README.md 或 Word/Excel 文件",
