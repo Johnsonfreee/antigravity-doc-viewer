@@ -12,6 +12,7 @@ export interface DocxMountOptions {
   mode?: OfficeViewMode;
   zoomSetting?: 'fit' | number;
   onOutline?: (items: OutlineNode[]) => void;
+  onPageInfo?: (info: { currentPage: number; totalPages: number; isDraft: boolean }) => void;
   onWorktreeChanged?: () => void;
   onToast?: (msg: string) => void;
 }
@@ -19,6 +20,9 @@ export interface DocxMountOptions {
 export interface DocxController {
   setMode: (mode: OfficeViewMode) => Promise<void>;
   setZoom: (zoom: 'fit' | number) => void;
+  getZoom: () => 'fit' | number;
+  goToPage: (page: number) => void;
+  getPageInfo: () => { currentPage: number; totalPages: number; isDraft: boolean };
   getContextSummary: () => string;
   scrollToHeading: (id: string) => void;
   destroy: () => void;
@@ -205,10 +209,26 @@ export async function mountDocxOfficeViewer(opts: DocxMountOptions): Promise<Doc
   let currentZoom: 'fit' | number = opts.zoomSetting ?? 'fit';
   let destroyed = false;
   let resizeObs: ResizeObserver | null = null;
+  let resizeTimer: number | undefined;
+  let lastAvailWidth = 0;
+  let lastAppliedScale = 0;
+  let cachedBlobUrls: string[] = [];
   let pageCount = 1;
+  let currentPage = 1;
   let plainTextCache = '';
   let cachedBytes: Uint8Array | null = null;
   let isDraft = false;
+
+  function revokeBlobUrls() {
+    for (const url of cachedBlobUrls) {
+      try {
+        URL.revokeObjectURL(url);
+      } catch {
+        // Ignore URL revoke error
+      }
+    }
+    cachedBlobUrls = [];
+  }
 
   container.innerHTML = `
     <div id="docx-stage-scroll" class="office-scroll">
@@ -216,17 +236,27 @@ export async function mountDocxOfficeViewer(opts: DocxMountOptions): Promise<Doc
     </div>
   `;
 
-  function applyScale(paperRoot: HTMLElement, scrollHost: HTMLElement) {
+  function applyScale(paperRoot: HTMLElement, scrollHost: HTMLElement, force = false) {
+    const avail = Math.max(240, scrollHost.clientWidth - 28);
+    if (!force && Math.abs(avail - lastAvailWidth) < 4) return;
     const sections = paperRoot.querySelectorAll<HTMLElement>('section.docx');
     const firstSec = sections[0];
     if (!firstSec) return;
     const naturalWidth = firstSec.offsetWidth || 794;
-    const avail = Math.max(240, scrollHost.clientWidth - 28);
     const scale = currentZoom === 'fit' ? Math.min(1.18, avail / naturalWidth) : currentZoom;
+    if (!force && Math.abs(scale - lastAppliedScale) < 0.005) {
+      lastAvailWidth = avail;
+      return;
+    }
+    lastAvailWidth = avail;
+    lastAppliedScale = scale;
     (paperRoot.style as CSSStyleDeclaration & { zoom?: string }).zoom = String(Number(scale.toFixed(3)));
   }
 
   async function renderPrintLayout() {
+    revokeBlobUrls();
+    lastAvailWidth = 0;
+    lastAppliedScale = 0;
     container.innerHTML = `<div id="docx-stage-scroll" class="office-scroll"><div class="office-loading">正在渲染仿真纸张视图…</div></div>`;
     const scrollEl = container.querySelector<HTMLElement>('#docx-stage-scroll')!;
 
@@ -253,12 +283,23 @@ export async function mountDocxOfficeViewer(opts: DocxMountOptions): Promise<Doc
       renderFooters: true,
       renderFootnotes: true,
       renderEndnotes: true,
-      useBase64URL: true,
+      useBase64URL: false,
       experimental: true,
     });
-    if (destroyed) return;
 
     const imgs = Array.from(host.querySelectorAll('img'));
+    for (const img of imgs) {
+      img.decoding = 'async';
+      const src = img.getAttribute('src') || img.src || '';
+      if (src.startsWith('blob:')) {
+        cachedBlobUrls.push(src);
+      }
+    }
+    if (destroyed) {
+      revokeBlobUrls();
+      return;
+    }
+
     await Promise.all(
       imgs.map((img) =>
         img.complete
@@ -269,7 +310,10 @@ export async function mountDocxOfficeViewer(opts: DocxMountOptions): Promise<Doc
             }),
       ),
     );
-    if (destroyed) return;
+    if (destroyed) {
+      revokeBlobUrls();
+      return;
+    }
 
     const wrapper = host.querySelector<HTMLElement>('.docx-wrapper');
     if (wrapper) {
@@ -302,19 +346,54 @@ export async function mountDocxOfficeViewer(opts: DocxMountOptions): Promise<Doc
     });
     opts.onOutline?.(outline.slice(0, 120));
 
-    applyScale(host, scrollEl);
+    applyScale(host, scrollEl, true);
+    host.classList.add('docx-paginated');
+
     resizeObs?.disconnect();
     resizeObs = new ResizeObserver(() => {
-      if (!destroyed && currentMode === 'print') {
-        applyScale(host, scrollEl);
-      }
+      if (destroyed || currentMode !== 'print') return;
+      window.clearTimeout(resizeTimer);
+      resizeTimer = window.setTimeout(() => {
+        if (!destroyed && currentMode === 'print') {
+          applyScale(host, scrollEl);
+        }
+      }, 60);
     });
     resizeObs.observe(scrollEl);
 
-    const statusBadge = document.createElement('div');
-    statusBadge.className = 'office-page-pill';
-    statusBadge.textContent = `${pageCount} 页${isDraft ? ' · 草稿预览' : ''}`;
-    scrollEl.appendChild(statusBadge);
+    currentPage = 1;
+    opts.onPageInfo?.({ currentPage, totalPages: pageCount, isDraft });
+
+    const cachedSections = Array.from(host.querySelectorAll<HTMLElement>('section.docx'));
+    let scrollRaf = 0;
+    scrollEl.addEventListener(
+      'scroll',
+      () => {
+        if (scrollRaf || destroyed) return;
+        scrollRaf = window.requestAnimationFrame(() => {
+          scrollRaf = 0;
+          if (!cachedSections.length) return;
+          const scrollRect = scrollEl.getBoundingClientRect();
+          const probeY = scrollRect.top + Math.min(140, scrollRect.height * 0.25);
+          let bestIdx = 0;
+          let bestDist = Infinity;
+          cachedSections.forEach((sec, idx) => {
+            const r = sec.getBoundingClientRect();
+            const dist = Math.abs(r.top - probeY);
+            if (dist < bestDist) {
+              bestDist = dist;
+              bestIdx = idx;
+            }
+          });
+          const nextPage = bestIdx + 1;
+          if (nextPage !== currentPage) {
+            currentPage = nextPage;
+            opts.onPageInfo?.({ currentPage, totalPages: pageCount, isDraft });
+          }
+        });
+      },
+      { passive: true },
+    );
   }
 
   async function renderInteractiveEditor() {
@@ -530,8 +609,18 @@ export async function mountDocxOfficeViewer(opts: DocxMountOptions): Promise<Doc
       currentZoom = zoom;
       const host = container.querySelector<HTMLElement>('#docx-paper-host');
       const scrollEl = container.querySelector<HTMLElement>('#docx-stage-scroll');
-      if (host && scrollEl) applyScale(host, scrollEl);
+      if (host && scrollEl) applyScale(host, scrollEl, true);
     },
+    getZoom: () => currentZoom,
+    goToPage(page) {
+      const sections = container.querySelectorAll<HTMLElement>('#docx-paper-host section.docx');
+      if (!sections.length) return;
+      const clamped = Math.max(1, Math.min(sections.length, Math.floor(page)));
+      currentPage = clamped;
+      sections[clamped - 1]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      opts.onPageInfo?.({ currentPage, totalPages: pageCount, isDraft });
+    },
+    getPageInfo: () => ({ currentPage, totalPages: pageCount, isDraft }),
     getContextSummary: () => plainTextCache.slice(0, 6000),
     scrollToHeading(id) {
       const target = container.querySelector<HTMLElement>(`#${CSS.escape(id)}`);
@@ -539,7 +628,9 @@ export async function mountDocxOfficeViewer(opts: DocxMountOptions): Promise<Doc
     },
     destroy() {
       destroyed = true;
+      window.clearTimeout(resizeTimer);
       resizeObs?.disconnect();
+      revokeBlobUrls();
     },
   };
 }

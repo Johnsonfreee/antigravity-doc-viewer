@@ -10,6 +10,7 @@ export type DocKind =
   | 'legacy_doc'
   | 'spreadsheet'
   | 'slides'
+  | 'legacy_ppt'
   | 'html'
   | 'image'
   | 'code'
@@ -64,14 +65,21 @@ const EXT_KIND_MAP: Record<string, DocKind> = {
   '.mdx': 'markdown',
   '.docx': 'docx',
   '.doc': 'legacy_doc',
+  '.wps': 'legacy_doc',
+  '.dot': 'legacy_doc',
+  '.rtf': 'legacy_doc',
+  '.odt': 'legacy_doc',
   '.xlsx': 'spreadsheet',
   '.xls': 'spreadsheet',
+  '.et': 'spreadsheet',
   '.xlsm': 'spreadsheet',
   '.xlsb': 'spreadsheet',
   '.ods': 'spreadsheet',
   '.csv': 'spreadsheet',
   '.tsv': 'spreadsheet',
   '.pptx': 'slides',
+  '.ppt': 'legacy_ppt',
+  '.dps': 'legacy_ppt',
   '.html': 'html',
   '.htm': 'html',
   '.xhtml': 'html',
@@ -134,8 +142,9 @@ const BINARY_EXTS = new Set([
 ]);
 
 export const DOCUMENT_EXTS = new Set([
-  '.pdf', '.md', '.markdown', '.mdx', '.docx', '.xlsx', '.xls', '.xlsm',
-  '.xlsb', '.ods', '.csv', '.tsv', '.pptx', '.html', '.htm', '.txt', '.json', '.yaml', '.yml',
+  '.pdf', '.md', '.markdown', '.mdx', '.docx', '.doc', '.wps', '.dot', '.rtf', '.odt',
+  '.xlsx', '.xls', '.et', '.xlsm', '.xlsb', '.ods', '.csv', '.tsv', '.pptx', '.ppt', '.dps',
+  '.html', '.htm', '.txt', '.json', '.yaml', '.yml',
 ]);
 
 export function classifyFile(filePath: string): DocKind {
@@ -149,23 +158,86 @@ export function classifyFile(filePath: string): DocKind {
   return ext ? 'text' : 'text';
 }
 
+function unwrapQuotesAndBrackets(value: string, maxPasses = 2): string {
+  let current = value.trim();
+  const pairs: Array<[string, string]> = [
+    ['"', '"'],
+    ["'", "'"],
+    ['`', '`'],
+    ['<', '>'],
+  ];
+  for (let pass = 0; pass < maxPasses; pass++) {
+    let changed = false;
+    for (const [open, close] of pairs) {
+      if (current.length >= 2 && current.startsWith(open) && current.endsWith(close)) {
+        current = current.slice(open.length, current.length - close.length).trim();
+        changed = true;
+        break;
+      }
+    }
+    if (!changed) break;
+  }
+  return current;
+}
+
 export function resolveInputPath(rawPath: string, baseDir?: string): string {
   let trimmed = rawPath.trim();
-  if (trimmed.startsWith('file://')) {
+
+  const mdLinkMatch = trimmed.match(/^\[[^\]]*\]\(([^)]+)\)$/);
+  if (mdLinkMatch) {
+    trimmed = mdLinkMatch[1].trim();
+  }
+
+  trimmed = unwrapQuotesAndBrackets(trimmed, 2);
+
+  if (trimmed.startsWith('@')) {
+    const afterAt = trimmed.slice(1);
+    if (/^(?:["'`]|file:\/\/|~[/\\]|\/|\.\.?[/\\]|[A-Za-z]:[/\\])/.test(afterAt)) {
+      trimmed = unwrapQuotesAndBrackets(afterAt, 2);
+    }
+  }
+
+  if (trimmed.toLowerCase().startsWith('file://')) {
     try {
       const u = new URL(trimmed);
-      trimmed = decodeURIComponent(u.pathname);
-      if (process.platform === 'win32' && /^\/[A-Za-z]:/.test(trimmed)) {
-        trimmed = trimmed.slice(1);
+      let decoded = u.pathname;
+      try {
+        decoded = decodeURIComponent(u.pathname);
+      } catch {
+        // Keep raw pathname if percent-decoding fails
+      }
+      if (process.platform === 'win32') {
+        if (u.hostname && u.hostname.toLowerCase() !== 'localhost') {
+          trimmed = `\\\\${u.hostname}${decoded.replace(/\//g, '\\')}`;
+        } else if (/^\/[A-Za-z]:/.test(decoded)) {
+          trimmed = decoded.slice(1);
+        } else {
+          trimmed = decoded;
+        }
+      } else {
+        trimmed = decoded;
       }
     } catch {
       // Keep original string if URL parsing fails
     }
   }
+
   if (trimmed === '~' || trimmed.startsWith('~/') || trimmed.startsWith('~\\')) {
     trimmed = path.join(os.homedir(), trimmed.slice(2));
   }
-  return path.isAbsolute(trimmed) ? path.normalize(trimmed) : path.resolve(baseDir || process.cwd(), trimmed);
+
+  const resolved = path.isAbsolute(trimmed)
+    ? path.normalize(trimmed)
+    : path.resolve(baseDir || process.cwd(), trimmed);
+
+  if (!existsSync(resolved)) {
+    const stripped = resolved.replace(/(?:#L\d+(?:-L?\d+)?|:\d+(?::\d+)?)$/i, '');
+    if (stripped !== resolved && stripped.length > 0 && existsSync(stripped)) {
+      return stripped;
+    }
+  }
+
+  return resolved;
 }
 
 export function isPluginInstallDir(dir: string): boolean {

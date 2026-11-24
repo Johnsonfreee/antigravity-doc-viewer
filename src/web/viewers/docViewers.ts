@@ -1,10 +1,20 @@
 import type { ViewerMcpClient } from '../mcpClient';
+import { buildShadowHtmlDocument } from '../htmlShadowAdapter';
 import { base64ToUint8Array, type OutlineNode } from './pdfViewer';
 
 export interface SimpleViewerController {
   getContextSummary: () => string;
   scrollToHeading?: (id: string) => void;
   destroy?: () => void;
+}
+
+export interface LegacyDocController {
+  delegatedToDocx?: boolean;
+  setZoom: (zoom: 'fit' | number) => void;
+  goToPage: (page: number) => void;
+  getContextSummary: () => string;
+  scrollToHeading: (id: string) => void;
+  destroy: () => void;
 }
 
 function escapeHtml(s: string): string {
@@ -252,89 +262,347 @@ export async function mountHtmlView(opts: {
 
   let previewHtml: string;
   let sourceHtml: string;
+  let plainText = '';
+  let liveUrl: string | null = null;
+  let staticUrl: string | null = null;
 
   if (filePath) {
     const res = await mcp.callTool<{
       previewHtml: string;
       sourceHtml: string;
       sourceTruncated: boolean;
+      plainText?: string;
+      liveUrl?: string | null;
+      staticUrl?: string | null;
     }>('app_render_html', { path: filePath });
     previewHtml = res.previewHtml;
     sourceHtml = res.sourceHtml;
+    plainText = res.plainText || '';
+    liveUrl = res.liveUrl ?? null;
+    staticUrl = res.staticUrl ?? null;
   } else {
     const raw = opts.rawHtmlText || '';
     previewHtml = raw.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '');
     sourceHtml = escapeHtml(raw);
   }
 
-  let mode: 'preview' | 'source' = 'preview';
-  let mobileWidth = false;
+  type HtmlRenderMode = 'live' | 'static' | 'shadow' | 'source';
+  type HtmlViewportMode = 'desktop' | 'fit' | 'mobile';
+  let mode: HtmlRenderMode = liveUrl ? 'live' : 'shadow';
+  let viewport: HtmlViewportMode = 'desktop';
+  let resizeObs: ResizeObserver | null = null;
+  let resizeTimer: number | undefined;
+  let lastStageWidth = 0;
+  let lastStageHeight = 0;
+  let activeIframe: HTMLIFrameElement | null = null;
+
+  const modeButtonsHtml = liveUrl
+    ? `
+      <button class="btn-sm primary" data-mode="live">实时浏览器</button>
+      <button class="btn-sm" data-mode="static">静态隔离</button>
+      <button class="btn-sm" data-mode="shadow">离线内联</button>
+      <button class="btn-sm" data-mode="source">源码</button>
+    `
+    : `
+      <button class="btn-sm primary" data-mode="shadow">离线预览</button>
+      <button class="btn-sm" data-mode="source">源码</button>
+    `;
 
   container.innerHTML = `
     <div class="subtoolbar">
-      <button id="html-mode-preview" class="btn-sm primary">预览（隔离模式）</button>
-      <button id="html-mode-source" class="btn-sm">源码</button>
-      <button id="html-width-toggle" class="btn-sm">390px 移动端</button>
+      <div id="html-mode-group" style="display:inline-flex;gap:4px">
+        ${modeButtonsHtml}
+      </div>
+      <div id="html-viewport-group" style="display:inline-flex;gap:4px;margin-left:6px">
+        <button class="btn-sm primary" data-vp="desktop">桌面 1280px</button>
+        <button class="btn-sm" data-vp="fit">适应侧栏</button>
+        <button class="btn-sm" data-vp="mobile">移动 390px</button>
+      </div>
       <span class="spacer"></span>
-      <span style="font-size:11px;color:var(--fg-2)">已禁用脚本与外网请求</span>
+      <span id="html-status-note" style="font-size:11px;color:var(--fg-2)"></span>
     </div>
     <div id="html-stage" class="html-stage"></div>
   `;
 
   const stageEl = container.querySelector<HTMLElement>('#html-stage')!;
-  const btnPreview = container.querySelector<HTMLButtonElement>('#html-mode-preview')!;
-  const btnSource = container.querySelector<HTMLButtonElement>('#html-mode-source')!;
-  const btnWidth = container.querySelector<HTMLButtonElement>('#html-width-toggle')!;
+  const modeGroup = container.querySelector<HTMLElement>('#html-mode-group')!;
+  const modeButtons = Array.from(modeGroup.querySelectorAll<HTMLButtonElement>('[data-mode]'));
+  const vpGroup = container.querySelector<HTMLElement>('#html-viewport-group')!;
+  const vpButtons = Array.from(vpGroup.querySelectorAll<HTMLButtonElement>('[data-vp]'));
+  const statusNoteEl = container.querySelector<HTMLElement>('#html-status-note')!;
+
+  function statusLabelForMode(m: HtmlRenderMode): string {
+    if (m === 'live') return '完整浏览器引擎 (127.0.0.1)';
+    if (m === 'static') return '浏览器静态隔离（禁脚本/外网）';
+    if (m === 'shadow') return '离线 Shadow DOM 预览';
+    return 'HTML 源码';
+  }
+
+  function applyIframeViewport(clipEl: HTMLElement, iframeEl: HTMLIFrameElement, force = false) {
+    const pad = viewport === 'mobile' ? 24 : 0;
+    const availW = Math.max(240, stageEl.clientWidth - pad);
+    const availH = Math.max(240, stageEl.clientHeight - pad);
+    if (!force && Math.abs(availW - lastStageWidth) < 4 && Math.abs(availH - lastStageHeight) < 4) return;
+    lastStageWidth = availW;
+    lastStageHeight = availH;
+
+    if (viewport === 'desktop') {
+      if (availW >= 1280) {
+        clipEl.style.width = '100%';
+        clipEl.style.height = '100%';
+        iframeEl.style.width = '100%';
+        iframeEl.style.height = '100%';
+        iframeEl.style.transform = 'none';
+      } else {
+        const scale = Math.max(0.2, availW / 1280);
+        clipEl.style.width = `${availW}px`;
+        clipEl.style.height = `${availH}px`;
+        iframeEl.style.width = '1280px';
+        iframeEl.style.height = `${Math.ceil(availH / scale)}px`;
+        iframeEl.style.transform = `scale(${scale.toFixed(4)})`;
+      }
+    } else if (viewport === 'fit') {
+      clipEl.style.width = '100%';
+      clipEl.style.height = '100%';
+      iframeEl.style.width = '100%';
+      iframeEl.style.height = '100%';
+      iframeEl.style.transform = 'none';
+    } else {
+      clipEl.style.width = `${Math.min(390, availW)}px`;
+      clipEl.style.height = `${availH}px`;
+      iframeEl.style.width = '100%';
+      iframeEl.style.height = '100%';
+      iframeEl.style.transform = 'none';
+    }
+  }
+
+  function applyShadowViewportSizing(zoomShell: HTMLElement, hostEl: HTMLElement, force = false) {
+    const avail = Math.max(240, stageEl.clientWidth);
+    if (!force && viewport !== 'desktop') return;
+    if (!force && Math.abs(avail - lastStageWidth) < 4) return;
+    lastStageWidth = avail;
+
+    const zoomStyle = zoomShell.style as CSSStyleDeclaration & { zoom?: string };
+    if (viewport === 'desktop') {
+      if (avail >= 1280) {
+        hostEl.style.width = '100%';
+        zoomShell.style.width = '100%';
+        zoomStyle.zoom = '1';
+      } else {
+        const scale = Math.max(0.2, Math.floor((avail / 1280) * 1000) / 1000);
+        hostEl.style.width = '1280px';
+        zoomShell.style.width = '1280px';
+        zoomStyle.zoom = String(scale);
+      }
+    } else if (viewport === 'fit') {
+      zoomShell.style.width = '100%';
+      zoomStyle.zoom = '1';
+      hostEl.style.width = '100%';
+    } else {
+      zoomShell.style.width = '390px';
+      zoomStyle.zoom = '1';
+      hostEl.style.width = '390px';
+    }
+  }
+
+  function renderShadowMode() {
+    stageEl.classList.remove('iframe-mode');
+    stageEl.classList.toggle('framed', viewport === 'mobile');
+    stageEl.innerHTML = '';
+
+    const zoomShell = document.createElement('div');
+    zoomShell.className = 'html-zoom-shell';
+
+    const hostEl = document.createElement('div');
+    hostEl.className = 'html-shadow-host';
+    zoomShell.appendChild(hostEl);
+    stageEl.appendChild(zoomShell);
+
+    const parsed = buildShadowHtmlDocument(previewHtml);
+    const shadow = hostEl.attachShadow({ mode: 'open' });
+
+    const resetStyleEl = document.createElement('style');
+    resetStyleEl.textContent = parsed.resetCss;
+    shadow.appendChild(resetStyleEl);
+
+    if (parsed.stylesCss) {
+      const pageStyleEl = document.createElement('style');
+      pageStyleEl.textContent = parsed.stylesCss;
+      shadow.appendChild(pageStyleEl);
+    }
+
+    const viewportBox = document.createElement('div');
+    viewportBox.className = 'html-viewport-box';
+
+    const htmlEl = document.createElement('div');
+    htmlEl.className = 'html-doc-html';
+    for (const [k, v] of parsed.htmlAttrs) {
+      if (k.toLowerCase() === 'class') htmlEl.className = `html-doc-html ${v}`.trim();
+      else htmlEl.setAttribute(k, v);
+    }
+
+    const bodyEl = document.createElement('div');
+    bodyEl.className = 'html-doc-body';
+    for (const [k, v] of parsed.bodyAttrs) {
+      if (k.toLowerCase() === 'class') bodyEl.className = `html-doc-body ${v}`.trim();
+      else bodyEl.setAttribute(k, v);
+    }
+    bodyEl.innerHTML = parsed.bodyHtml;
+
+    htmlEl.appendChild(bodyEl);
+    viewportBox.appendChild(htmlEl);
+    shadow.appendChild(viewportBox);
+
+    const isTransparent = (bg: string) => !bg || bg === 'transparent' || bg === 'rgba(0, 0, 0, 0)';
+    const bodyBg = getComputedStyle(bodyEl).backgroundColor;
+    const htmlBg = getComputedStyle(htmlEl).backgroundColor;
+    if (!isTransparent(bodyBg)) hostEl.style.backgroundColor = bodyBg;
+    else if (!isTransparent(htmlBg)) hostEl.style.backgroundColor = htmlBg;
+    else hostEl.style.backgroundColor = '#ffffff';
+
+    shadow.addEventListener('click', (e) => {
+      const target = e.target as Element | null;
+      const anchor = target?.closest('a[href]') as HTMLAnchorElement | null;
+      if (!anchor) return;
+      const href = (anchor.getAttribute('href') || '').trim();
+      if (href.startsWith('#') && href.length > 1) {
+        e.preventDefault();
+        let id = href.slice(1);
+        try {
+          id = decodeURIComponent(id);
+        } catch {
+          // Keep raw fragment if malformed percent-encoding
+        }
+        const anchorTarget =
+          shadow.getElementById(id) || shadow.querySelector(`[name="${CSS.escape(id)}"]`);
+        anchorTarget?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      } else {
+        e.preventDefault();
+      }
+    });
+
+    shadow.addEventListener('submit', (e) => {
+      e.preventDefault();
+    });
+
+    applyShadowViewportSizing(zoomShell, hostEl, true);
+
+    resizeObs = new ResizeObserver(() => {
+      if (mode !== 'shadow' || viewport !== 'desktop') return;
+      const w = stageEl.clientWidth;
+      if (w <= 0 || Math.abs(w - lastStageWidth) < 4) return;
+      window.clearTimeout(resizeTimer);
+      resizeTimer = window.setTimeout(() => {
+        if (mode === 'shadow' && viewport === 'desktop') {
+          applyShadowViewportSizing(zoomShell, hostEl);
+        }
+      }, 60);
+    });
+    resizeObs.observe(stageEl);
+  }
 
   function renderMode() {
-    btnPreview.className = `btn-sm ${mode === 'preview' ? 'primary' : ''}`;
-    btnSource.className = `btn-sm ${mode === 'source' ? 'primary' : ''}`;
-    btnWidth.classList.toggle('hidden', mode !== 'preview');
+    window.clearTimeout(resizeTimer);
+    resizeObs?.disconnect();
+    resizeObs = null;
+    lastStageWidth = 0;
+    lastStageHeight = 0;
+    if (activeIframe) {
+      activeIframe.src = 'about:blank';
+      activeIframe = null;
+    }
+
+    for (const btn of modeButtons) {
+      btn.className = `btn-sm ${btn.dataset.mode === mode ? 'primary' : ''}`;
+    }
+    vpGroup.classList.toggle('hidden', mode === 'source');
+    for (const btn of vpButtons) {
+      btn.className = `btn-sm ${btn.dataset.vp === viewport ? 'primary' : ''}`;
+    }
+    statusNoteEl.textContent = statusLabelForMode(mode);
 
     if (mode === 'source') {
+      stageEl.classList.remove('iframe-mode', 'framed');
       stageEl.innerHTML = `<div class="viewer-scroll" style="width:100%;background:var(--code-bg)"><pre class="hljs" style="margin:0;font-family:var(--font-code);font-size:12px;white-space:pre-wrap">${sourceHtml}</pre></div>`;
       return;
     }
 
-    // Use Shadow DOM by default so preview works cleanly even when host CSP has frame-src 'none'
-    stageEl.innerHTML = '';
-    const wrapper = document.createElement('div');
-    wrapper.style.width = mobileWidth ? '390px' : '100%';
-    wrapper.style.maxWidth = '100%';
-    wrapper.style.minHeight = '100%';
-    wrapper.style.background = '#ffffff';
-    wrapper.style.color = '#111827';
-    wrapper.style.border = '1px solid var(--bd-1)';
-    wrapper.style.borderRadius = '6px';
-    wrapper.style.overflow = 'auto';
-    wrapper.style.padding = '12px';
-    stageEl.appendChild(wrapper);
+    if ((mode === 'live' || mode === 'static') && liveUrl) {
+      stageEl.classList.add('iframe-mode');
+      stageEl.classList.toggle('framed', viewport === 'mobile');
+      stageEl.innerHTML = '';
 
-    const shadow = wrapper.attachShadow({ mode: 'open' });
-    const bodyMatch = /<body\b[^>]*>([\s\S]*?)<\/body>/i.exec(previewHtml);
-    const styleMatches = [...previewHtml.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)].map((m) => m[0]).join('\n');
-    const bodyContent = bodyMatch ? bodyMatch[1] : previewHtml;
-    shadow.innerHTML = `${styleMatches}<div class="html-preview-root">${bodyContent}</div>`;
+      const clipEl = document.createElement('div');
+      clipEl.className = 'html-iframe-clip';
+
+      const iframeEl = document.createElement('iframe');
+      iframeEl.className = 'html-preview-iframe';
+      iframeEl.setAttribute(
+        'sandbox',
+        mode === 'live' ? 'allow-scripts allow-same-origin allow-forms allow-popups' : 'allow-same-origin',
+      );
+      iframeEl.title = filePath ? filePath.split(/[\\/]/).pop() || 'HTML Preview' : 'HTML Preview';
+      iframeEl.src = mode === 'live' ? liveUrl : staticUrl || liveUrl;
+
+      iframeEl.addEventListener('error', () => {
+        mode = 'shadow';
+        renderMode();
+      });
+
+      clipEl.appendChild(iframeEl);
+      stageEl.appendChild(clipEl);
+      activeIframe = iframeEl;
+
+      applyIframeViewport(clipEl, iframeEl, true);
+
+      resizeObs = new ResizeObserver(() => {
+        if (mode !== 'live' && mode !== 'static') return;
+        window.clearTimeout(resizeTimer);
+        resizeTimer = window.setTimeout(() => {
+          if (mode === 'live' || mode === 'static') {
+            applyIframeViewport(clipEl, iframeEl);
+          }
+        }, 60);
+      });
+      resizeObs.observe(stageEl);
+      return;
+    }
+
+    renderShadowMode();
   }
 
-  btnPreview.addEventListener('click', () => {
-    mode = 'preview';
-    renderMode();
-  });
-  btnSource.addEventListener('click', () => {
-    mode = 'source';
-    renderMode();
-  });
-  btnWidth.addEventListener('click', () => {
-    mobileWidth = !mobileWidth;
-    btnWidth.textContent = mobileWidth ? '100% 桌面宽度' : '390px 移动端';
-    renderMode();
-  });
+  for (const btn of modeButtons) {
+    btn.addEventListener('click', () => {
+      mode = btn.dataset.mode as HtmlRenderMode;
+      renderMode();
+    });
+  }
+  for (const btn of vpButtons) {
+    btn.addEventListener('click', () => {
+      viewport = btn.dataset.vp as HtmlViewportMode;
+      renderMode();
+    });
+  }
 
   renderMode();
 
   return {
-    getContextSummary: () => stageEl.innerText.slice(0, 5000),
+    getContextSummary: () => {
+      if (plainText) return plainText.slice(0, 5000);
+      const shadowBody = stageEl
+        .querySelector('.html-shadow-host')
+        ?.shadowRoot?.querySelector<HTMLElement>('.html-doc-body');
+      return (shadowBody?.innerText || stageEl.innerText).slice(0, 5000);
+    },
+    destroy: () => {
+      window.clearTimeout(resizeTimer);
+      resizeObs?.disconnect();
+      resizeObs = null;
+      if (activeIframe) {
+        activeIframe.src = 'about:blank';
+        activeIframe = null;
+      }
+    },
   };
 }
 
@@ -494,6 +762,166 @@ export async function mountImageView(opts: {
     getContextSummary: () => `Image file: ${filePath || 'dropped image'}`,
     destroy: () => {
       if (blobUrl) URL.revokeObjectURL(blobUrl);
+    },
+  };
+}
+
+export async function mountLegacyDocView(opts: {
+  container: HTMLElement;
+  mcp: ViewerMcpClient;
+  filePath: string;
+  zoomSetting?: 'fit' | number;
+  onOutline?: (items: OutlineNode[]) => void;
+  onPageInfo?: (info: { currentPage: number; totalPages: number }) => void;
+}): Promise<LegacyDocController> {
+  const { container, mcp, filePath } = opts;
+  let currentZoom: 'fit' | number = opts.zoomSetting ?? 'fit';
+  let destroyed = false;
+  let resizeObs: ResizeObserver | null = null;
+  let resizeTimer: number | undefined;
+  let lastAvailWidth = 0;
+  let lastAppliedScale = 0;
+  let currentPage = 1;
+
+  container.innerHTML = `<div class="office-scroll"><div class="office-loading">正在离线解析文档排版…</div></div>`;
+  const res = await mcp.callTool<{
+    format: string;
+    delegateKind?: 'docx';
+    pages: Array<{ pageNumber: number; html: string }>;
+    toc: Array<{ id: string; level: number; text: string }>;
+    plainText: string;
+    notices: string[];
+  }>('app_render_legacy_doc', { path: filePath });
+
+  if (destroyed) {
+    return {
+      setZoom() {},
+      goToPage() {},
+      getContextSummary: () => '',
+      scrollToHeading() {},
+      destroy() {},
+    };
+  }
+
+  if (res.delegateKind === 'docx') {
+    return {
+      delegatedToDocx: true,
+      setZoom() {},
+      goToPage() {},
+      getContextSummary: () => '',
+      scrollToHeading() {},
+      destroy() {},
+    };
+  }
+
+  const noticeText = res.notices?.[0] || '';
+  const pagesHtml = (res.pages || [])
+    .map(
+      (p) => `
+      <section class="legacy-a4-page" data-page="${p.pageNumber}">
+        ${p.html}
+      </section>`,
+    )
+    .join('');
+
+  container.innerHTML = `
+    <div id="legacy-stage-scroll" class="office-scroll">
+      ${noticeText ? `<div class="legacy-doc-banner"><span>${escapeHtml(noticeText)}</span><span>${res.pages.length} 页</span></div>` : ''}
+      <div id="legacy-pages-host" class="legacy-pages-host">${pagesHtml}</div>
+    </div>
+  `;
+
+  const scrollEl = container.querySelector<HTMLElement>('#legacy-stage-scroll')!;
+  const hostEl = container.querySelector<HTMLElement>('#legacy-pages-host')!;
+  const pageEls = Array.from(hostEl.querySelectorAll<HTMLElement>('.legacy-a4-page'));
+  const totalPages = Math.max(1, res.pages?.length || 1);
+
+  const applyScale = (force = false) => {
+    const firstPage = pageEls[0];
+    if (!firstPage) return;
+    const avail = Math.max(240, scrollEl.clientWidth - 28);
+    if (!force && Math.abs(avail - lastAvailWidth) < 4) return;
+    const naturalWidth = firstPage.offsetWidth || 794;
+    const scale = currentZoom === 'fit' ? Math.min(1.18, avail / naturalWidth) : currentZoom;
+    if (!force && Math.abs(scale - lastAppliedScale) < 0.005) {
+      lastAvailWidth = avail;
+      return;
+    }
+    lastAvailWidth = avail;
+    lastAppliedScale = scale;
+    (hostEl.style as CSSStyleDeclaration & { zoom?: string }).zoom = String(Number(scale.toFixed(3)));
+  };
+
+  applyScale(true);
+  resizeObs = new ResizeObserver(() => {
+    if (destroyed) return;
+    window.clearTimeout(resizeTimer);
+    resizeTimer = window.setTimeout(() => {
+      if (!destroyed) applyScale();
+    }, 60);
+  });
+  resizeObs.observe(scrollEl);
+
+  opts.onOutline?.(
+    (res.toc || []).map((t) => ({
+      title: t.text,
+      level: t.level,
+      id: t.id,
+    })),
+  );
+  opts.onPageInfo?.({ currentPage: 1, totalPages });
+
+  let scrollRaf = 0;
+  scrollEl.addEventListener(
+    'scroll',
+    () => {
+      if (scrollRaf || destroyed) return;
+      scrollRaf = window.requestAnimationFrame(() => {
+        scrollRaf = 0;
+        if (!pageEls.length) return;
+        const scrollRect = scrollEl.getBoundingClientRect();
+        const probeY = scrollRect.top + Math.min(140, scrollRect.height * 0.25);
+        let bestIdx = 0;
+        let bestDist = Infinity;
+        pageEls.forEach((sec, idx) => {
+          const r = sec.getBoundingClientRect();
+          const dist = Math.abs(r.top - probeY);
+          if (dist < bestDist) {
+            bestDist = dist;
+            bestIdx = idx;
+          }
+        });
+        const nextPage = bestIdx + 1;
+        if (nextPage !== currentPage) {
+          currentPage = nextPage;
+          opts.onPageInfo?.({ currentPage, totalPages });
+        }
+      });
+    },
+    { passive: true },
+  );
+
+  return {
+    setZoom(zoom) {
+      currentZoom = zoom;
+      applyScale(true);
+    },
+    goToPage(page) {
+      if (!pageEls.length) return;
+      const clamped = Math.max(1, Math.min(pageEls.length, Math.floor(page)));
+      currentPage = clamped;
+      pageEls[clamped - 1]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      opts.onPageInfo?.({ currentPage, totalPages });
+    },
+    getContextSummary: () => (res.plainText || '').slice(0, 6000),
+    scrollToHeading(id) {
+      const target = hostEl.querySelector<HTMLElement>(`#${CSS.escape(id)}`);
+      target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    },
+    destroy() {
+      destroyed = true;
+      window.clearTimeout(resizeTimer);
+      resizeObs?.disconnect();
     },
   };
 }

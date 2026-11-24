@@ -13,6 +13,7 @@ import { z } from 'zod';
 import {
   classifyFile,
   DOCUMENT_EXTS,
+  type FileEntry,
   getDefaultRootDir,
   getFileMeta,
   getPdfAsset,
@@ -37,6 +38,9 @@ import {
   renderPptxBuffer,
   WorktreeManager,
 } from './officeWorktree.js';
+import { renderLegacyDocument, renderLegacyPpt } from './legacyOffice.js';
+import { listOpenWithApps, openExternalFile } from './openWith.js';
+import { HtmlPreviewGateway } from './htmlPreviewGateway.js';
 import { StateStore } from './state.js';
 
 const APP_URI = 'ui://doc-viewer/app.html';
@@ -164,6 +168,12 @@ async function main() {
   const pdfAssetsRoot = path.join(distDir, 'pdfjs-assets');
   const store = new StateStore(dataDir);
   const worktrees = new WorktreeManager(dataDir);
+  const previewGateway = new HtmlPreviewGateway();
+  const previewOrigin = await previewGateway.start();
+  const appUiMeta = {
+    prefersBorder: false,
+    ...(previewOrigin ? { csp: { frameDomains: [previewOrigin] } } : {}),
+  };
 
   const server = new McpServer({
     name: 'doc-viewer',
@@ -179,9 +189,7 @@ async function main() {
         'Offline Office & Document Viewer (Word A4 pagination, Excel/CSV grid, PowerPoint slides, PDF CJK, Markdown, HTML, worktree compare).',
       mimeType: RESOURCE_MIME_TYPE,
       _meta: {
-        ui: {
-          prefersBorder: false,
-        },
+        ui: appUiMeta,
       },
     },
     async () => {
@@ -193,9 +201,7 @@ async function main() {
             mimeType: RESOURCE_MIME_TYPE,
             text: html,
             _meta: {
-              ui: {
-                prefersBorder: false,
-              },
+              ui: appUiMeta,
             },
           },
         ],
@@ -209,9 +215,9 @@ async function main() {
     {
       title: 'Doc & PDF Viewer',
       description:
-        'Open the interactive Office & Document viewer in Antigravity sidebar (or global view). Supports true A4 paginated .docx, interactive .xlsx/.csv, .pptx slides, PDF (CJK), Markdown, HTML, and worktree review.',
+        'Open the interactive Office & Document viewer in Antigravity sidebar. Supports true A4 paginated .docx, legacy .doc/.wps/.rtf/.odt, interactive .xlsx/.xls/.et/.csv, .pptx/.ppt/.dps slides, PDF (CJK), Markdown, HTML, and worktree review.',
       inputSchema: {
-        path: z.string().optional().describe('Optional path to a .docx, .xlsx, .csv, .pptx, .pdf, .md, .html, image, or code file.'),
+        path: z.string().optional().describe('Optional path to a .docx, .doc, .wps, .rtf, .odt, .xlsx, .xls, .et, .csv, .pptx, .ppt, .pdf, .md, .html, image, or code file.'),
         rootDir: z.string().optional().describe('Optional directory path to open in the sidebar file browser.'),
         page: z.number().int().min(1).optional().describe('Optional 1-based page or slide number.'),
         sheet: z.string().optional().describe('Optional sheet name for Excel workbooks.'),
@@ -224,7 +230,6 @@ async function main() {
         'com.google.antigravity/ui': {
           entrypoints: [
             { type: 'aux_pane', title: 'Doc Viewer' },
-            { type: 'global', title: 'Doc Viewer' },
           ],
         },
       },
@@ -313,9 +318,9 @@ async function main() {
     {
       title: 'Inspect Office Document',
       description:
-        'Inspect structured content of Word (.docx paragraphs & tables), Excel/CSV (sheets & rows), or PowerPoint (.pptx slides) from disk or active draft worktree.',
+        'Inspect structured content of Word (.docx, .doc, .wps, .rtf, .odt), Excel/CSV (.xlsx, .xls, .et, .csv), or PowerPoint (.pptx, .ppt, .dps) from disk or active draft worktree.',
       inputSchema: {
-        path: z.string().describe('Path to .docx, .xlsx, .xls, .ods, .csv, .tsv, or .pptx file.'),
+        path: z.string().describe('Path to .docx, .doc, .wps, .rtf, .odt, .xlsx, .xls, .et, .ods, .csv, .tsv, .pptx, .ppt, or .dps file.'),
         useDraft: z.boolean().optional().describe('Inspect staged draft worktree if active (default true).'),
         sheetName: z.string().optional().describe('Sheet name for spreadsheet files.'),
         page: z.number().int().min(1).optional().describe('Page number for spreadsheet rows.'),
@@ -331,6 +336,23 @@ async function main() {
         if (kind === 'docx') {
           const info = await inspectDocxBuffer(buf);
           return okResult({ path: resolved, kind, hasDraft, ...info });
+        }
+        if (kind === 'legacy_doc') {
+          const legacy = await renderLegacyDocument(resolved);
+          if (legacy.delegateKind === 'docx') {
+            const info = await inspectDocxBuffer(buf);
+            return okResult({ path: resolved, kind: 'docx', format: legacy.format, hasDraft, ...info });
+          }
+          return okResult({
+            path: resolved,
+            kind,
+            format: legacy.format,
+            hasDraft: false,
+            paragraphCount: legacy.paragraphCount,
+            pageCount: legacy.pages.length,
+            toc: legacy.toc,
+            plainText: legacy.plainText.slice(0, 12000),
+          });
         }
         if (kind === 'spreadsheet') {
           const sheet = await renderSpreadsheet(resolved, {
@@ -349,6 +371,30 @@ async function main() {
             plainText: s.plainText,
           }));
           return okResult({ path: resolved, kind, hasDraft, slideCount: pres.slideCount, slides: compactSlides });
+        }
+        if (kind === 'legacy_ppt') {
+          const legacyPpt = await renderLegacyPpt(resolved);
+          if (legacyPpt.delegateKind === 'pptx') {
+            const pres = await renderPptxBuffer(buf);
+            const compactSlides = pres.slides.map((s) => ({
+              slideNumber: s.slideNumber,
+              title: s.title,
+              plainText: s.plainText,
+            }));
+            return okResult({ path: resolved, kind: 'slides', slideCount: pres.slideCount, slides: compactSlides });
+          }
+          const compactSlides = legacyPpt.slides.map((s) => ({
+            slideNumber: s.slideNumber,
+            title: s.title,
+            plainText: s.plainText,
+          }));
+          return okResult({
+            path: resolved,
+            kind,
+            format: legacyPpt.format,
+            slideCount: legacyPpt.slideCount,
+            slides: compactSlides,
+          });
         }
         throw new Error(`Unsupported Office inspection type: ${kind} (${resolved})`);
       } catch (err) {
@@ -952,7 +998,14 @@ async function main() {
     },
     async ({ path: rawPath }) => {
       try {
-        return okResult(await renderHtmlFile(rawPath));
+        const rendered = await renderHtmlFile(rawPath);
+        const urls = previewGateway.registerFile(resolveInputPath(rawPath));
+        return okResult({
+          ...rendered,
+          liveUrl: urls?.liveUrl ?? null,
+          staticUrl: urls?.staticUrl ?? null,
+          previewOrigin: urls?.origin ?? null,
+        });
       } catch (err) {
         return errorResult(err instanceof Error ? err.message : String(err));
       }
@@ -1039,7 +1092,362 @@ async function main() {
     },
   );
 
+  registerAppTool(
+    server,
+    'app_list_open_with',
+    {
+      description: 'Discover system default and registered external Open-With apps for a file path.',
+      inputSchema: { path: z.string() },
+      _meta: appOnlyMeta,
+    },
+    async ({ path: rawPath }) => {
+      try {
+        return okResult({ ...(await listOpenWithApps(rawPath)) });
+      } catch (err) {
+        return errorResult(err instanceof Error ? err.message : String(err));
+      }
+    },
+  );
+
+  registerAppTool(
+    server,
+    'app_open_external',
+    {
+      description: 'Launch a document with the system default app, a specific Open-With app, Choose Another App dialog, or reveal in file manager.',
+      inputSchema: {
+        path: z.string(),
+        action: z.enum(['default', 'app', 'choose', 'reveal']),
+        exePath: z.string().optional(),
+      },
+      _meta: appOnlyMeta,
+    },
+    async ({ path: rawPath, action, exePath }) => {
+      try {
+        return okResult(await openExternalFile(rawPath, action, exePath));
+      } catch (err) {
+        return errorResult(err instanceof Error ? err.message : String(err));
+      }
+    },
+  );
+
+  registerAppTool(
+    server,
+    'app_render_legacy_doc',
+    {
+      description: 'Render legacy Word (.doc, .wps, .dot, .rtf, .odt, HTML/MHTML .doc) into paginated A4 HTML pages.',
+      inputSchema: { path: z.string() },
+      _meta: appOnlyMeta,
+    },
+    async ({ path: rawPath }) => {
+      try {
+        return okResult({ ...(await renderLegacyDocument(rawPath)) });
+      } catch (err) {
+        return errorResult(err instanceof Error ? err.message : String(err));
+      }
+    },
+  );
+
+  registerAppTool(
+    server,
+    'app_render_legacy_ppt',
+    {
+      description: 'Render legacy PowerPoint (.ppt, .dps) binary presentations into slide models.',
+      inputSchema: { path: z.string() },
+      _meta: appOnlyMeta,
+    },
+    async ({ path: rawPath }) => {
+      try {
+        return okResult({ ...(await renderLegacyPpt(rawPath)) });
+      } catch (err) {
+        return errorResult(err instanceof Error ? err.message : String(err));
+      }
+    },
+  );
+
+  const DROP_CACHE_DIR = path.resolve(dataDir, 'dropped-cache');
+  const MAX_DROPPED_FILE_BYTES = 50 * 1024 * 1024;
+  const DROP_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+
+  registerAppTool(
+    server,
+    'app_resolve_dropped_target',
+    {
+      description: 'Resolve dragged or pasted file paths, file:// URIs, or bare filenames to local files or directories.',
+      inputSchema: {
+        candidates: z.array(z.string()).max(20).optional(),
+        fallbackNames: z.array(z.string()).max(10).optional(),
+        currentDir: z.string().optional(),
+      },
+      _meta: appOnlyMeta,
+    },
+    async ({ candidates = [], fallbackNames = [], currentDir }) => {
+      try {
+        const keyOf = (p: string) => (process.platform === 'win32' ? p.toLowerCase() : p);
+        const baseDir = currentDir ? resolveInputPath(currentDir) : getDefaultRootDir();
+        const defaultRoot = getDefaultRootDir();
+
+        const rootCandidates: string[] = [];
+        const seenRoots = new Set<string>();
+        const pushRoot = (r?: string) => {
+          if (!r) return;
+          const norm = path.normalize(r);
+          const k = keyOf(norm);
+          if (seenRoots.has(k)) return;
+          seenRoots.add(k);
+          rootCandidates.push(norm);
+        };
+        pushRoot(baseDir);
+        pushRoot(defaultRoot);
+        for (const qr of getQuickRoots()) pushRoot(qr.path);
+
+        // Pass 1: direct path / file:// URI / markdown link resolution
+        const matchedFiles: string[] = [];
+        const seenFiles = new Set<string>();
+        let matchedDir: string | null = null;
+
+        for (const raw of candidates) {
+          const trimmedRaw = raw.trim();
+          if (!trimmedRaw) continue;
+
+          const probeRoots = [baseDir];
+          const looksRooted = /^(?:["'`<@]*(?:file:\/\/|~[/\\]|\/|[A-Za-z]:[/\\]|\\\\))/i.test(trimmedRaw);
+          if (!looksRooted) {
+            for (const r of rootCandidates) {
+              if (r !== baseDir) probeRoots.push(r);
+            }
+          }
+
+          for (const root of probeRoots) {
+            const candidatePath = resolveInputPath(trimmedRaw, root);
+            if (!existsSync(candidatePath)) continue;
+            try {
+              const st = await fs.stat(candidatePath);
+              if (st.isFile()) {
+                const k = keyOf(candidatePath);
+                if (!seenFiles.has(k)) {
+                  seenFiles.add(k);
+                  matchedFiles.push(candidatePath);
+                }
+                break;
+              }
+              if (st.isDirectory() && !matchedDir) {
+                matchedDir = candidatePath;
+                break;
+              }
+            } catch {
+              // Skip unreadable paths
+            }
+          }
+          if (matchedFiles.length >= 5) break;
+        }
+
+        if (matchedFiles.length > 0) {
+          return okResult({ action: 'open_files', paths: matchedFiles });
+        }
+        if (matchedDir) {
+          return okResult({ action: 'open_dir', path: matchedDir });
+        }
+
+        // Pass 2: bare filename search fallback
+        const cleanFallbackName = (raw: string): string => {
+          let s = raw.trim();
+          if (s.startsWith('@')) s = s.slice(1).trim();
+          for (let i = 0; i < 2; i++) {
+            if (
+              s.length >= 2 &&
+              ((s.startsWith('"') && s.endsWith('"')) ||
+                (s.startsWith("'") && s.endsWith("'")) ||
+                (s.startsWith('`') && s.endsWith('`')))
+            ) {
+              s = s.slice(1, -1).trim();
+            }
+          }
+          s = s.replace(/(?:#L\d+(?:-L?\d+)?|:\d+(?::\d+)?)$/i, '').trim();
+          return s;
+        };
+
+        const cleanedNames = fallbackNames.map(cleanFallbackName).filter(Boolean);
+        if (cleanedNames.length > 0) {
+          const state = await store.load();
+          for (const cleaned of cleanedNames) {
+            const qLower = cleaned.toLowerCase();
+            const allMatches: FileEntry[] = [];
+            const seenMatches = new Set<string>();
+
+            const addEntry = (entry: FileEntry) => {
+              const k = keyOf(entry.path);
+              if (seenMatches.has(k)) return;
+              seenMatches.add(k);
+              allMatches.push(entry);
+            };
+
+            const addFileIfExists = async (filePath: string) => {
+              const norm = path.normalize(filePath);
+              const k = keyOf(norm);
+              if (seenMatches.has(k) || !existsSync(norm)) return;
+              try {
+                const st = await fs.stat(norm);
+                if (!st.isFile()) return;
+                const name = path.basename(norm);
+                addEntry({
+                  name,
+                  path: norm,
+                  isDir: false,
+                  size: st.size,
+                  mtimeMs: st.mtimeMs,
+                  ext: path.extname(name).toLowerCase(),
+                  kind: classifyFile(norm),
+                });
+              } catch {
+                // Ignore inaccessible file
+              }
+            };
+
+            // 1) Recent files & bookmarks
+            for (const item of [...state.recentFiles, ...state.bookmarks]) {
+              const baseLower = path.basename(item.path).toLowerCase();
+              if ((baseLower === qLower || baseLower.includes(qLower)) && existsSync(item.path)) {
+                await addFileIfExists(item.path);
+              }
+            }
+
+            // 2) Direct path.join in baseDir & defaultRoot
+            await addFileIfExists(path.join(baseDir, cleaned));
+            if (keyOf(defaultRoot) !== keyOf(baseDir)) {
+              await addFileIfExists(path.join(defaultRoot, cleaned));
+            }
+
+            // 3) Recursive searchDocuments in baseDir and defaultRoot
+            const baseSearch = await searchDocuments(baseDir, { query: cleaned, maxDepth: 5, limit: 25 });
+            for (const entry of baseSearch.items) addEntry(entry);
+
+            if (keyOf(defaultRoot) !== keyOf(baseDir)) {
+              const defaultSearch = await searchDocuments(defaultRoot, { query: cleaned, maxDepth: 5, limit: 25 });
+              for (const entry of defaultSearch.items) addEntry(entry);
+            }
+
+            // 4) Fallback shallow search in Desktop, Documents, Downloads if still empty
+            if (allMatches.length === 0) {
+              const home = os.homedir();
+              for (const folder of ['Desktop', 'Documents', 'Downloads']) {
+                const dir = path.join(home, folder);
+                if (!existsSync(dir)) continue;
+                const res = await searchDocuments(dir, { query: cleaned, maxDepth: 2, limit: 15 });
+                for (const entry of res.items) addEntry(entry);
+              }
+            }
+
+            const exactMatches = allMatches.filter((m) => m.name.toLowerCase() === qLower);
+            if (exactMatches.length === 1) {
+              return okResult({ action: 'open_files', paths: [exactMatches[0].path] });
+            }
+            if (exactMatches.length > 1) {
+              return okResult({ action: 'pick_matches', query: cleaned, matches: exactMatches.slice(0, 20) });
+            }
+            if (allMatches.length === 1) {
+              return okResult({ action: 'open_files', paths: [allMatches[0].path] });
+            }
+            if (allMatches.length > 1) {
+              return okResult({ action: 'pick_matches', query: cleaned, matches: allMatches.slice(0, 20) });
+            }
+          }
+        }
+
+        return okResult({
+          action: 'not_found',
+          query: cleanedNames[0] || fallbackNames[0] || candidates[0] || '',
+        });
+      } catch (err) {
+        return errorResult(err instanceof Error ? err.message : String(err));
+      }
+    },
+  );
+
+  registerAppTool(
+    server,
+    'app_stage_dropped_file',
+    {
+      description: 'Stage a browser-dropped local file in chunks under temporary dataDir cache for offline parsing.',
+      inputSchema: {
+        uploadId: z.string().regex(/^[A-Za-z0-9_-]{4,64}$/),
+        name: z.string().min(1).max(260),
+        chunkBase64: z.string(),
+        offset: z.number().int().min(0),
+        final: z.boolean(),
+      },
+      _meta: appOnlyMeta,
+    },
+    async ({ uploadId, name, chunkBase64, offset, final }) => {
+      try {
+        let safeName = path.basename(name).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').trim();
+        if (!safeName || safeName === '.' || safeName === '..') {
+          safeName = 'dropped-file';
+        }
+        const uploadDir = path.resolve(DROP_CACHE_DIR, uploadId);
+        const targetPath = path.resolve(uploadDir, safeName);
+        if (!targetPath.startsWith(DROP_CACHE_DIR + path.sep)) {
+          throw new Error(`Path traversal rejected: ${name}`);
+        }
+
+        const buf = Buffer.from(chunkBase64, 'base64');
+        if (buf.byteLength > MAX_CHUNK_BYTES + 4096) {
+          throw new Error(`Chunk size ${buf.byteLength} exceeds maximum allowed chunk limit`);
+        }
+        if (offset + buf.byteLength > MAX_DROPPED_FILE_BYTES) {
+          throw new Error(`Dropped file exceeds 50 MiB size limit`);
+        }
+
+        if (offset === 0) {
+          // Best-effort TTL cleanup of stale dropped-cache folders
+          try {
+            const entries = await fs.readdir(DROP_CACHE_DIR, { withFileTypes: true });
+            const cutoff = Date.now() - DROP_CACHE_TTL_MS;
+            for (const entry of entries) {
+              if (!entry.isDirectory()) continue;
+              const entryDir = path.join(DROP_CACHE_DIR, entry.name);
+              try {
+                const st = await fs.stat(entryDir);
+                if (st.mtimeMs < cutoff) {
+                  await fs.rm(entryDir, { recursive: true, force: true });
+                }
+              } catch {
+                // Ignore individual prune error
+              }
+            }
+          } catch {
+            // Cache dir may not exist yet
+          }
+
+          await fs.mkdir(uploadDir, { recursive: true });
+          await fs.writeFile(targetPath, buf);
+        } else {
+          const st = await fs.stat(targetPath);
+          if (st.size !== offset) {
+            throw new Error(`Chunk offset mismatch: expected ${st.size}, got ${offset}`);
+          }
+          await fs.appendFile(targetPath, buf);
+        }
+
+        if (final) {
+          const meta = await getFileMeta(targetPath);
+          return okResult({ staged: true, file: meta, isTemporary: true });
+        }
+        return okResult({ staged: false, bytesWritten: offset + buf.byteLength });
+      } catch (err) {
+        return errorResult(err instanceof Error ? err.message : String(err));
+      }
+    },
+  );
+
   const transport = new StdioServerTransport();
+  transport.onclose = () => {
+    void previewGateway.close();
+  };
+  const shutdownGateway = () => {
+    void previewGateway.close();
+  };
+  process.once('SIGINT', shutdownGateway);
+  process.once('SIGTERM', shutdownGateway);
   await server.connect(transport);
 }
 

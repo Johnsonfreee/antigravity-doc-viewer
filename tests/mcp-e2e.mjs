@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import JSZip from 'jszip';
 import * as XLSX from 'xlsx';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -111,7 +111,12 @@ async function createFixtures(dir) {
     'utf-8',
   );
 
-  await fs.writeFile(path.join(dir, 'docs', 'page.css'), 'body { color: #123456; }', 'utf-8');
+  await fs.writeFile(path.join(dir, 'docs', 'tokens.css'), ':root { --brand: #123c32; }\n', 'utf-8');
+  await fs.writeFile(
+    path.join(dir, 'docs', 'page.css'),
+    '@import "./tokens.css";\nbody { color: #123456; background-image: url("../assets/pixel.png"); }\n',
+    'utf-8',
+  );
   await fs.writeFile(
     path.join(dir, 'docs', 'preview.html'),
     `<!DOCTYPE html><html><head><link rel="stylesheet" href="./page.css"></head><body><h1>Hello Local HTML</h1><img src="../assets/pixel.png"><script>window.pwned = true;</script></body></html>`,
@@ -122,6 +127,32 @@ async function createFixtures(dir) {
     `export function greet(name: string): string {\n  return \`Hello \${name}\`;\n}\n`,
     'utf-8',
   );
+
+  // Legacy RTF fixture with Chinese Unicode escapes and explicit \page break
+  await fs.writeFile(
+    path.join(dir, 'docs', 'notes.rtf'),
+    '{\\rtf1\\ansi\\deff0{\\fonttbl{\\f0 SimSun;}}\\uc1\\pard 1. \\u23454?\\u39564?\\u30446?\\u30340?\\par\\par Hello RTF World!\\page\\pard 2. \\u24635?\\u32467?\\par Second page text.\\par}',
+    'latin1',
+  );
+
+  // Legacy ODT fixture
+  const odtZip = new JSZip();
+  odtZip.file('mimetype', 'application/vnd.oasis.opendocument.text');
+  odtZip.file(
+    'content.xml',
+    `<?xml version="1.0" encoding="UTF-8"?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0">
+  <office:body><office:text>
+    <text:h text:outline-level="1">ODT 架构概览</text:h>
+    <text:p>支持纯 JS 离线解析 OpenDocument 文档。</text:p>
+    <table:table>
+      <table:table-row><table:table-cell><text:p>格式</text:p></table:table-cell><table:table-cell><text:p>状态</text:p></table:table-cell></table:table-row>
+      <table:table-row><table:table-cell><text:p>.odt</text:p></table:table-cell><table:table-cell><text:p>已支持</text:p></table:table-cell></table:table-row>
+    </table:table>
+  </office:text></office:body>
+</office:document-content>`,
+  );
+  await fs.writeFile(path.join(dir, 'docs', 'summary.odt'), await odtZip.generateAsync({ type: 'nodebuffer' }));
 }
 
 async function main() {
@@ -149,7 +180,6 @@ async function main() {
     assert.equal(openTool._meta?.ui?.resourceUri, 'ui://doc-viewer/app.html');
     assert.deepEqual(openTool._meta?.['com.google.antigravity/ui']?.entrypoints, [
       { type: 'aux_pane', title: 'Doc Viewer' },
-      { type: 'global', title: 'Doc Viewer' },
     ]);
 
     for (const officeToolName of [
@@ -178,6 +208,8 @@ async function main() {
     assert.equal(readUi.contents[0].mimeType, 'text/html;profile=mcp-app');
     assert.ok(readUi.contents[0].text.includes('<!DOCTYPE html>'));
     assert.ok(Buffer.byteLength(readUi.contents[0].text, 'utf-8') < 10 * 1024 * 1024);
+    const frameDomains = readUi.contents[0]._meta?.ui?.csp?.frameDomains;
+    assert.ok(Array.isArray(frameDomains) && frameDomains.some((d) => d.startsWith('http://127.0.0.1:')));
 
     // 3. open_document_viewer with {} and with PDF path
     const emptyOpen = await client.callTool({ name: 'open_document_viewer', arguments: {} });
@@ -371,13 +403,48 @@ async function main() {
     assert.equal(pptRendered.structuredContent.slideCount, 2);
     assert.equal(pptRendered.structuredContent.slides[0].title, '人机交互实验总结');
 
-    // 10. Local HTML, Code, State Persistence
+    // 10. Local HTML, Loopback Preview Gateway, Code, State Persistence
     const htmlRes = await client.callTool({
       name: 'app_render_html',
       arguments: { path: path.join(fixtureDir, 'docs', 'preview.html') },
     });
     assert.ok(htmlRes.structuredContent.previewHtml.includes('#123456'));
+    assert.ok(htmlRes.structuredContent.previewHtml.includes('#123c32'));
+    assert.ok(htmlRes.structuredContent.previewHtml.includes('url("data:image/png;base64,'));
     assert.ok(!htmlRes.structuredContent.previewHtml.includes('window.pwned'));
+    assert.ok(typeof htmlRes.structuredContent.liveUrl === 'string' && htmlRes.structuredContent.liveUrl.startsWith('http://127.0.0.1:'));
+    assert.ok(typeof htmlRes.structuredContent.staticUrl === 'string' && htmlRes.structuredContent.staticUrl.startsWith('http://127.0.0.1:'));
+
+    const liveResp = await fetch(htmlRes.structuredContent.liveUrl);
+    assert.equal(liveResp.status, 200);
+    assert.ok(liveResp.headers.get('content-type')?.includes('text/html'));
+    const liveBody = await liveResp.text();
+    assert.ok(liveBody.includes('Hello Local HTML'));
+
+    const staticResp = await fetch(htmlRes.structuredContent.staticUrl);
+    assert.equal(staticResp.status, 200);
+    assert.ok(staticResp.headers.get('content-security-policy')?.includes("script-src 'none'"));
+    await staticResp.body?.cancel();
+
+    const cssResp = await fetch(new URL('./page.css', htmlRes.structuredContent.liveUrl));
+    assert.equal(cssResp.status, 200);
+    assert.ok(cssResp.headers.get('content-type')?.includes('text/css'));
+    const cssText = await cssResp.text();
+    assert.ok(cssText.includes('#123456'));
+
+    const pngResp = await fetch(new URL('../assets/pixel.png', htmlRes.structuredContent.liveUrl));
+    assert.equal(pngResp.status, 200);
+    assert.ok(pngResp.headers.get('content-type')?.includes('image/png'));
+    await pngResp.body?.cancel();
+
+    const badTokenUrl = new URL('/p/00000000000000000000000000000000/docs/preview.html', htmlRes.structuredContent.liveUrl);
+    const badTokenResp = await fetch(badTokenUrl);
+    assert.equal(badTokenResp.status, 403);
+    await badTokenResp.body?.cancel();
+
+    const traversalResp = await fetch(new URL('../../../../../etc/passwd', htmlRes.structuredContent.liveUrl));
+    assert.ok(traversalResp.status === 403 || traversalResp.status === 404);
+    await traversalResp.body?.cancel();
 
     const codeRes = await client.callTool({
       name: 'app_read_text',
@@ -422,7 +489,155 @@ async function main() {
       console.log(`[e2e] Verified real .docx report (${realOpen.structuredContent.file.size} bytes, ${realInspect.structuredContent.paragraphCount} paragraphs) read-only!`);
     }
 
-    console.log('[e2e] All 11 Office & MCP end-to-end test groups passed!');
+    // 12. Legacy formats (.rtf, .odt, real .doc) + Open-With discovery
+    const rtfPath = path.join(fixtureDir, 'docs', 'notes.rtf');
+    const rtfRes = await client.callTool({ name: 'app_render_legacy_doc', arguments: { path: rtfPath } });
+    assert.equal(rtfRes.structuredContent.format, 'rtf');
+    assert.equal(rtfRes.structuredContent.pages.length, 2);
+    assert.ok(rtfRes.structuredContent.plainText.includes('实验目的'));
+    assert.ok(rtfRes.structuredContent.plainText.includes('Hello RTF World!'));
+
+    const odtPath = path.join(fixtureDir, 'docs', 'summary.odt');
+    const odtRes = await client.callTool({ name: 'app_render_legacy_doc', arguments: { path: odtPath } });
+    assert.equal(odtRes.structuredContent.format, 'odt');
+    assert.ok(odtRes.structuredContent.plainText.includes('ODT 架构概览'));
+    assert.ok(odtRes.structuredContent.toc.some((t) => t.text.includes('ODT 架构概览')));
+
+    const odtInspect = await client.callTool({ name: 'office_inspect_document', arguments: { path: odtPath } });
+    assert.equal(odtInspect.structuredContent.kind, 'legacy_doc');
+    assert.ok(odtInspect.structuredContent.plainText.includes('已支持'));
+
+    const realDocPath = 'D:\\实验报告模板(1).doc';
+    if (existsSync(realDocPath)) {
+      const realDocRes = await client.callTool({ name: 'app_render_legacy_doc', arguments: { path: realDocPath } });
+      assert.equal(realDocRes.structuredContent.format, 'doc');
+      assert.ok(realDocRes.structuredContent.pages.length >= 2);
+      assert.ok(realDocRes.structuredContent.plainText.includes('编译原理设计实践报告'));
+      assert.ok(realDocRes.structuredContent.plainText.includes('湘潭大学'));
+      console.log(`[e2e] Verified real legacy .doc (${realDocRes.structuredContent.pages.length} pages, ${realDocRes.structuredContent.paragraphCount} blocks)!`);
+    }
+
+    const openWithRes = await client.callTool({ name: 'app_list_open_with', arguments: { path: docxPath } });
+    assert.equal(openWithRes.structuredContent.ext, '.docx');
+    assert.ok(Array.isArray(openWithRes.structuredContent.apps));
+    if (process.platform === 'win32') {
+      assert.ok(openWithRes.structuredContent.apps.length > 0, 'Windows should discover at least one Open-With app for .docx');
+      const first = openWithRes.structuredContent.apps[0];
+      assert.ok(first.name && first.exePath);
+      if (first.iconDataUri) {
+        assert.ok(first.iconDataUri.startsWith('data:image/png;base64,'));
+      }
+      console.log(`[e2e] Discovered ${openWithRes.structuredContent.apps.length} Open-With apps (default: ${openWithRes.structuredContent.defaultApp?.name})`);
+    }
+
+    // 13. Drag-and-drop path resolution, filename disambiguation, and temp staging
+    const rtfFileUrl = pathToFileURL(rtfPath).href;
+    const quotedOpen = await client.callTool({
+      name: 'app_open_file_meta',
+      arguments: { path: `"${rtfPath}"`, recordRecent: false },
+    });
+    assert.equal(quotedOpen.structuredContent.file.path, path.normalize(rtfPath));
+
+    const mdLinkOpen = await client.callTool({
+      name: 'app_open_file_meta',
+      arguments: { path: `[notes](${rtfFileUrl}#L10-L20)`, recordRecent: false },
+    });
+    assert.equal(mdLinkOpen.structuredContent.file.path, path.normalize(rtfPath));
+
+    const atPrefixedOpen = await client.callTool({
+      name: 'app_open_file_meta',
+      arguments: { path: `@${rtfPath}`, recordRecent: false },
+    });
+    assert.equal(atPrefixedOpen.structuredContent.file.path, path.normalize(rtfPath));
+
+    const resolvedUri = await client.callTool({
+      name: 'app_resolve_dropped_target',
+      arguments: { candidates: [`${rtfFileUrl}#L1-L5`], currentDir: fixtureDir },
+    });
+    assert.equal(resolvedUri.structuredContent.action, 'open_files');
+    assert.equal(resolvedUri.structuredContent.paths[0], path.normalize(rtfPath));
+
+    const resolvedDir = await client.callTool({
+      name: 'app_resolve_dropped_target',
+      arguments: { candidates: [path.join(fixtureDir, 'docs')], currentDir: fixtureDir },
+    });
+    assert.equal(resolvedDir.structuredContent.action, 'open_dir');
+    assert.equal(resolvedDir.structuredContent.path, path.join(fixtureDir, 'docs'));
+
+    const resolvedBare = await client.callTool({
+      name: 'app_resolve_dropped_target',
+      arguments: { fallbackNames: ['notes.rtf'], currentDir: fixtureDir },
+    });
+    assert.equal(resolvedBare.structuredContent.action, 'open_files');
+    assert.equal(resolvedBare.structuredContent.paths[0], path.normalize(rtfPath));
+
+    await fs.mkdir(path.join(fixtureDir, 'dir-a'), { recursive: true });
+    await fs.mkdir(path.join(fixtureDir, 'dir-b'), { recursive: true });
+    await fs.writeFile(path.join(fixtureDir, 'dir-a', 'dup-target.md'), '# Copy A\n', 'utf-8');
+    await fs.writeFile(path.join(fixtureDir, 'dir-b', 'dup-target.md'), '# Copy B\n', 'utf-8');
+
+    const resolvedAmbiguous = await client.callTool({
+      name: 'app_resolve_dropped_target',
+      arguments: { fallbackNames: ['dup-target.md'], currentDir: fixtureDir },
+    });
+    assert.equal(resolvedAmbiguous.structuredContent.action, 'pick_matches');
+    assert.ok(resolvedAmbiguous.structuredContent.matches.length >= 2);
+
+    const resolvedMissing = await client.callTool({
+      name: 'app_resolve_dropped_target',
+      arguments: { fallbackNames: ['definitely-missing-xyz-999.docx'], currentDir: fixtureDir },
+    });
+    assert.equal(resolvedMissing.structuredContent.action, 'not_found');
+
+    const rtfBuf = await fs.readFile(rtfPath);
+    const half = Math.ceil(rtfBuf.length / 2);
+    const stage1 = await client.callTool({
+      name: 'app_stage_dropped_file',
+      arguments: {
+        uploadId: 'e2e_stage_rtf_1',
+        name: 'dropped-notes.rtf',
+        chunkBase64: rtfBuf.subarray(0, half).toString('base64'),
+        offset: 0,
+        final: false,
+      },
+    });
+    assert.equal(stage1.structuredContent.staged, false);
+    assert.equal(stage1.structuredContent.bytesWritten, half);
+
+    const stage2 = await client.callTool({
+      name: 'app_stage_dropped_file',
+      arguments: {
+        uploadId: 'e2e_stage_rtf_1',
+        name: 'dropped-notes.rtf',
+        chunkBase64: rtfBuf.subarray(half).toString('base64'),
+        offset: half,
+        final: true,
+      },
+    });
+    assert.equal(stage2.structuredContent.staged, true);
+    assert.equal(stage2.structuredContent.isTemporary, true);
+    assert.equal(stage2.structuredContent.file.kind, 'legacy_doc');
+
+    const stagedRtfRender = await client.callTool({
+      name: 'app_render_legacy_doc',
+      arguments: { path: stage2.structuredContent.file.path },
+    });
+    assert.equal(stagedRtfRender.structuredContent.format, 'rtf');
+    assert.ok(stagedRtfRender.structuredContent.plainText.includes('实验目的'));
+
+    const badStage = await client.callTool({
+      name: 'app_stage_dropped_file',
+      arguments: {
+        uploadId: '../bad',
+        name: 'notes.rtf',
+        chunkBase64: rtfBuf.toString('base64'),
+        offset: 0,
+        final: true,
+      },
+    });
+    assert.equal(badStage.isError, true);
+
+    console.log('[e2e] All 13 Office, Legacy, Open-With & Drag-Drop end-to-end test groups passed!');
   } finally {
     await client.close();
     await fs.rm(tmpRoot, { recursive: true, force: true });

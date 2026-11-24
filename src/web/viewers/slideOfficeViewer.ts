@@ -24,6 +24,7 @@ interface PptxSlideModel {
 export interface SlideController {
   setMode: (mode: OfficeViewMode) => Promise<void>;
   goToSlide: (slideNumber: number) => void;
+  getSlideInfo: () => { current: number; total: number };
   getContextSummary: () => string;
   destroy: () => void;
 }
@@ -42,29 +43,43 @@ export async function mountSlideOfficeViewer(opts: {
   filePath: string;
   initialSlide?: number;
   mode?: OfficeViewMode;
+  legacy?: boolean;
   onOutline?: (items: OutlineNode[]) => void;
+  onSlideChange?: (current: number, total: number) => void;
   onWorktreeChanged?: () => void;
   onToast?: (msg: string) => void;
 }): Promise<SlideController> {
   const { container, mcp, filePath } = opts;
-  let currentMode: OfficeViewMode = opts.mode ?? 'print';
+  let isLegacy = Boolean(opts.legacy);
+  let currentMode: OfficeViewMode = isLegacy ? 'print' : (opts.mode ?? 'print');
   let activeSlideNum = opts.initialSlide ?? 1;
   let slides: PptxSlideModel[] = [];
   let destroyed = false;
 
   async function renderSlidesView() {
     container.innerHTML = `<div class="office-scroll"><div class="office-loading">正在解析 PowerPoint 幻灯片…</div></div>`;
-    const res = await mcp.callTool<{
+    let res: {
       slideCount: number;
       widthPt: number;
       heightPt: number;
       slides: PptxSlideModel[];
       hasDraft?: boolean;
-    }>('app_render_pptx', { path: filePath, useDraft: true });
+      delegateKind?: 'pptx';
+    };
+    if (isLegacy) {
+      res = await mcp.callTool('app_render_legacy_ppt', { path: filePath });
+      if (res.delegateKind === 'pptx') {
+        isLegacy = false;
+        res = await mcp.callTool('app_render_pptx', { path: filePath, useDraft: true });
+      }
+    } else {
+      res = await mcp.callTool('app_render_pptx', { path: filePath, useDraft: true });
+    }
     if (destroyed) return;
 
     slides = res.slides;
     activeSlideNum = Math.max(1, Math.min(slides.length || 1, activeSlideNum));
+    opts.onSlideChange?.(activeSlideNum, slides.length || 1);
 
     opts.onOutline?.(
       slides.map((s) => ({
@@ -218,6 +233,11 @@ export async function mountSlideOfficeViewer(opts: {
   }
 
   async function setMode(mode: OfficeViewMode) {
+    if (isLegacy && mode !== 'print') {
+      currentMode = 'print';
+      opts.onToast?.('旧版 .ppt 暂为只读预览，可通过右上角「打开方式」用 PowerPoint / WPS 编辑');
+      return;
+    }
     currentMode = mode;
     if (mode === 'compare') await renderCompareView();
     else await renderSlidesView();
@@ -229,8 +249,10 @@ export async function mountSlideOfficeViewer(opts: {
     setMode,
     goToSlide(num) {
       activeSlideNum = Math.max(1, Math.min(slides.length || 1, num));
+      opts.onSlideChange?.(activeSlideNum, slides.length || 1);
       void renderSlidesView();
     },
+    getSlideInfo: () => ({ current: activeSlideNum, total: slides.length || 1 }),
     getContextSummary() {
       return slides.map((s) => `[Slide ${s.slideNumber}] ${s.plainText}`).join('\n\n').slice(0, 6000);
     },

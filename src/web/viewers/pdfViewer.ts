@@ -28,6 +28,8 @@ export interface PdfMountOptions {
 
 export interface PdfController {
   goToPage: (page: number) => void;
+  setZoom: (zoom: 'fit' | number) => void;
+  getZoom: () => 'fit' | number;
   getCurrentPageText: () => Promise<string>;
   getCurrentPage: () => number;
   getTotalPages: () => number;
@@ -185,6 +187,8 @@ export async function mountPdfViewer(opts: PdfMountOptions): Promise<PdfControll
   let pageWrappers: HTMLElement[] = [];
   let renderedPages = new Map<number, number>(); // pageNum -> scale rendered
   let renderingSet = new Set<number>();
+  let resizeTimer: number | undefined;
+  let lastObservedWidth = 0;
   let basePageWidth = 595;
   let basePageHeight = 842;
   let searchHits: number[] = [];
@@ -210,10 +214,27 @@ export async function mountPdfViewer(opts: PdfMountOptions): Promise<PdfControll
     }
   }
 
+  function evictDistantPages(centerPage: number): void {
+    for (const [p] of renderedPages) {
+      if (Math.abs(p - centerPage) <= 4 || renderingSet.has(p)) continue;
+      const wrapper = pageWrappers[p - 1];
+      if (wrapper) {
+        wrapper.querySelectorAll('canvas').forEach((c) => {
+          c.width = 0;
+          c.height = 0;
+        });
+        wrapper.innerHTML = '';
+      }
+      renderedPages.delete(p);
+    }
+  }
+
   async function renderPage(pageNum: number): Promise<void> {
     if (destroyed || !pdfDoc) return;
     const scale = computeScale();
-    if (renderedPages.get(pageNum) === scale || renderingSet.has(pageNum)) return;
+    const prevScale = renderedPages.get(pageNum);
+    if (prevScale !== undefined && Math.abs(prevScale - scale) < 0.01) return;
+    if (renderingSet.has(pageNum)) return;
 
     renderingSet.add(pageNum);
     try {
@@ -229,10 +250,14 @@ export async function mountPdfViewer(opts: PdfMountOptions): Promise<PdfControll
       wrapper.style.width = `${Math.round(viewport.width)}px`;
       wrapper.style.height = `${Math.round(viewport.height)}px`;
       wrapper.style.setProperty('--scale-factor', String(scale));
+      wrapper.querySelectorAll('canvas').forEach((oldCanvas) => {
+        oldCanvas.width = 0;
+        oldCanvas.height = 0;
+      });
       wrapper.innerHTML = '';
 
       const canvas = document.createElement('canvas');
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
       canvas.width = Math.floor(viewport.width * dpr);
       canvas.height = Math.floor(viewport.height * dpr);
       canvas.style.width = `${Math.round(viewport.width)}px`;
@@ -259,6 +284,7 @@ export async function mountPdfViewer(opts: PdfMountOptions): Promise<PdfControll
       await textLayer.render();
 
       renderedPages.set(pageNum, scale);
+      evictDistantPages(currentPage);
     } catch {
       // Ignore cancelled page renders
     } finally {
@@ -438,9 +464,16 @@ export async function mountPdfViewer(opts: PdfMountOptions): Promise<PdfControll
   });
 
   const resizeObserver = new ResizeObserver(() => {
-    if (fitMode === 'width' && totalPages > 0 && !destroyed) {
-      reRenderVisible();
-    }
+    if (fitMode !== 'width' || totalPages === 0 || destroyed) return;
+    const w = scrollEl.clientWidth;
+    if (w <= 0 || Math.abs(w - lastObservedWidth) < 6) return;
+    window.clearTimeout(resizeTimer);
+    resizeTimer = window.setTimeout(() => {
+      if (fitMode === 'width' && totalPages > 0 && !destroyed) {
+        lastObservedWidth = scrollEl.clientWidth;
+        reRenderVisible();
+      }
+    }, 180);
   });
   resizeObserver.observe(scrollEl);
 
@@ -514,6 +547,7 @@ export async function mountPdfViewer(opts: PdfMountOptions): Promise<PdfControll
 
     setupObserver();
     goToPage(Math.min(Math.max(1, currentPage), totalPages));
+    lastObservedWidth = scrollEl.clientWidth;
     opts.onOutline?.(await extractOutline(pdfDoc));
   } catch (err) {
     if (!destroyed) {
@@ -525,6 +559,18 @@ export async function mountPdfViewer(opts: PdfMountOptions): Promise<PdfControll
 
   return {
     goToPage,
+    setZoom(zoom: 'fit' | number) {
+      if (zoom === 'fit') {
+        fitMode = 'width';
+        zoomSelect.value = 'width';
+      } else {
+        fitMode = 'custom';
+        customZoom = Math.max(0.5, Math.min(3, Number(zoom.toFixed(2))));
+        zoomSelect.value = String(customZoom);
+      }
+      if (totalPages > 0) reRenderVisible();
+    },
+    getZoom: () => (fitMode === 'width' ? 'fit' : customZoom),
     getCurrentPage: () => currentPage,
     getTotalPages: () => totalPages,
     async getCurrentPageText(): Promise<string> {
@@ -535,9 +581,16 @@ export async function mountPdfViewer(opts: PdfMountOptions): Promise<PdfControll
     },
     destroy(): void {
       destroyed = true;
+      window.clearTimeout(resizeTimer);
       abort.abort();
       observer?.disconnect();
       resizeObserver.disconnect();
+      for (const wrapper of pageWrappers) {
+        wrapper.querySelectorAll('canvas').forEach((c) => {
+          c.width = 0;
+          c.height = 0;
+        });
+      }
       void pdfDoc?.destroy();
       pdfDoc = null;
     },

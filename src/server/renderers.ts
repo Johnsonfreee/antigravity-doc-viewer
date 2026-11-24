@@ -23,6 +23,18 @@ const IMAGE_MIME_MAP: Record<string, string> = {
   '.ico': 'image/x-icon',
 };
 
+const FONT_MIME_MAP: Record<string, string> = {
+  '.woff2': 'font/woff2',
+  '.woff': 'font/woff',
+  '.ttf': 'font/ttf',
+  '.otf': 'font/otf',
+};
+
+const CSS_ASSET_MIME_MAP: Record<string, string> = {
+  ...IMAGE_MIME_MAP,
+  ...FONT_MIME_MAP,
+};
+
 const EXT_LANG_MAP: Record<string, string> = {
   '.ts': 'typescript',
   '.tsx': 'typescript',
@@ -425,47 +437,180 @@ export async function renderSpreadsheet(
   };
 }
 
-async function inlineLocalStyles(html: string, baseDir: string, maxTotalCssBytes = 200 * 1024): Promise<string> {
-  let remaining = maxTotalCssBytes;
-  const linkRegex = /<link\b([^>]*?)>/gi;
-  const matches = [...html.matchAll(linkRegex)];
-  if (matches.length === 0) return html;
-
+async function replaceAsync(
+  input: string,
+  regex: RegExp,
+  replacer: (match: RegExpMatchArray) => Promise<string>,
+): Promise<string> {
+  const matches = [...input.matchAll(regex)];
+  if (matches.length === 0) return input;
   let out = '';
   let lastIndex = 0;
   for (const m of matches) {
+    const start = m.index ?? 0;
+    out += input.slice(lastIndex, start);
+    lastIndex = start + m[0].length;
+    out += await replacer(m);
+  }
+  out += input.slice(lastIndex);
+  return out;
+}
+
+async function inlineCssLocalAssets(
+  css: string,
+  cssDir: string,
+  budget: { cssBytes: number; assetBytes: number },
+  visited: Set<string>,
+  depth = 0,
+): Promise<string> {
+  let processed = css;
+
+  // 1) Recursively inline local @import stylesheets (depth limit < 3)
+  if (depth < 3) {
+    const importRe =
+      /@import\s+(?:url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s"']+))\s*\)|"([^"]*)"|'([^']*)')([^;]*);/gi;
+    processed = await replaceAsync(processed, importRe, async (m) => {
+      const href = (m[1] ?? m[2] ?? m[3] ?? m[4] ?? m[5] ?? '').trim();
+      const mediaOrLayer = (m[6] || '').trim();
+      if (!href || isRemoteOrSpecialUri(href)) {
+        return '';
+      }
+
+      let cleanRel = href.split(/[?#]/)[0];
+      try {
+        cleanRel = decodeURIComponent(cleanRel);
+      } catch {
+        // Keep raw relative path if decodeURIComponent fails
+      }
+
+      const resolved = path.resolve(cssDir, cleanRel);
+      const visitKey = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+      if (visited.has(visitKey)) {
+        return '';
+      }
+
+      try {
+        const stat = await fs.stat(resolved);
+        if (stat.isFile() && stat.size <= budget.cssBytes) {
+          visited.add(visitKey);
+          const childCss = await fs.readFile(resolved, 'utf-8');
+          budget.cssBytes -= Buffer.byteLength(childCss, 'utf-8');
+          const inlinedChild = await inlineCssLocalAssets(
+            childCss,
+            path.dirname(resolved),
+            budget,
+            visited,
+            depth + 1,
+          );
+          if (mediaOrLayer && !/^(?:layer|supports)\b/i.test(mediaOrLayer)) {
+            return `@media ${mediaOrLayer} {\n${inlinedChild}\n}`;
+          }
+          return inlinedChild;
+        }
+      } catch {
+        // Ignore missing imported CSS
+      }
+      return '';
+    });
+  }
+
+  // 2) Inline local url(...) images and fonts up to 150 KiB each
+  const urlRe = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)"'\s]+))\s*\)/gi;
+  processed = await replaceAsync(processed, urlRe, async (m) => {
+    const rawUrl = (m[1] ?? m[2] ?? m[3] ?? '').trim();
+    if (!rawUrl || isRemoteOrSpecialUri(rawUrl)) {
+      return m[0];
+    }
+
+    let cleanRel = rawUrl.split(/[?#]/)[0];
+    try {
+      cleanRel = decodeURIComponent(cleanRel);
+    } catch {
+      // Keep raw relative path if decodeURIComponent fails
+    }
+
+    const resolved = path.resolve(cssDir, cleanRel);
+    const ext = path.extname(resolved).toLowerCase();
+    const mime = CSS_ASSET_MIME_MAP[ext];
+    if (!mime) {
+      return m[0];
+    }
+
+    try {
+      const stat = await fs.stat(resolved);
+      if (stat.isFile() && stat.size <= 150 * 1024 && stat.size <= budget.assetBytes) {
+        const buf = await fs.readFile(resolved);
+        budget.assetBytes -= buf.byteLength;
+        return `url("data:${mime};base64,${buf.toString('base64')}")`;
+      }
+    } catch {
+      // Ignore missing CSS asset
+    }
+    return m[0];
+  });
+
+  return processed;
+}
+
+async function inlineLocalStyles(html: string, baseDir: string, maxTotalCssBytes = 500 * 1024): Promise<string> {
+  const budget = { cssBytes: maxTotalCssBytes, assetBytes: 350 * 1024 };
+  const visited = new Set<string>();
+
+  const linkRegex = /<link\b([^>]*?)>/gi;
+  let result = await replaceAsync(html, linkRegex, async (m) => {
     const full = m[0];
     const attrs = m[1] || '';
-    const start = m.index ?? 0;
-    out += html.slice(lastIndex, start);
-    lastIndex = start + full.length;
-
     const isStylesheet = /\brel\s*=\s*(?:"[^"]*\bstylesheet\b[^"]*"|'[^']*\bstylesheet\b[^']*')/i.test(attrs);
     const hrefMatch = /\bhref\s*=\s*(?:"([^"]*)"|'([^']*)')/i.exec(attrs);
     const href = (hrefMatch?.[1] ?? hrefMatch?.[2] ?? '').trim();
 
-    if (!isStylesheet || !href || isRemoteOrSpecialUri(href)) {
-      out += full;
-      continue;
+    if (!isStylesheet || !href) {
+      return full;
+    }
+    if (/^(?:https?:|\/\/)/i.test(href)) {
+      return '';
+    }
+    if (isRemoteOrSpecialUri(href)) {
+      return full;
     }
 
-    const cleanRel = decodeURIComponent(href.split(/[?#]/)[0]);
+    let cleanRel = href.split(/[?#]/)[0];
+    try {
+      cleanRel = decodeURIComponent(cleanRel);
+    } catch {
+      // Keep raw relative path
+    }
+
     const resolved = path.resolve(baseDir, cleanRel);
+    const visitKey = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+    if (visited.has(visitKey)) {
+      return '';
+    }
+
     try {
       const stat = await fs.stat(resolved);
-      if (stat.isFile() && stat.size <= remaining) {
-        const css = await fs.readFile(resolved, 'utf-8');
-        remaining -= Buffer.byteLength(css, 'utf-8');
-        out += `<style>\n${css.replace(/<\/style>/gi, '<\\/style>')}\n</style>`;
-        continue;
+      if (stat.isFile() && stat.size <= budget.cssBytes) {
+        visited.add(visitKey);
+        const rawCss = await fs.readFile(resolved, 'utf-8');
+        budget.cssBytes -= Buffer.byteLength(rawCss, 'utf-8');
+        const css = await inlineCssLocalAssets(rawCss, path.dirname(resolved), budget, visited, 0);
+        return `<style>\n${css.replace(/<\/style>/gi, '<\\/style>')}\n</style>`;
       }
     } catch {
       // Ignore missing stylesheet
     }
-    out += '';
-  }
-  out += html.slice(lastIndex);
-  return out;
+    return '';
+  });
+
+  const styleRegex = /<style\b([^>]*)>([\s\S]*?)<\/style>/gi;
+  result = await replaceAsync(result, styleRegex, async (m) => {
+    const attrs = m[1] || '';
+    const inner = m[2] || '';
+    const processed = await inlineCssLocalAssets(inner, baseDir, budget, visited, 0);
+    return `<style${attrs}>${processed.replace(/<\/style>/gi, '<\\/style>')}</style>`;
+  });
+
+  return result;
 }
 
 export async function renderHtmlFile(rawPath: string): Promise<{
@@ -473,6 +618,7 @@ export async function renderHtmlFile(rawPath: string): Promise<{
   sourceHtml: string;
   sourceTruncated: boolean;
   totalBytes: number;
+  plainText: string;
 }> {
   const filePath = resolveInputPath(rawPath);
   const stat = await fs.stat(filePath);
@@ -493,8 +639,8 @@ export async function renderHtmlFile(rawPath: string): Promise<{
   }
 
   const baseDir = path.dirname(filePath);
-  const withCss = await inlineLocalStyles(raw, baseDir);
-  const withAssets = await inlineLocalImages(withCss, baseDir, 150 * 1024, 300 * 1024);
+  const withCss = await inlineLocalStyles(raw, baseDir, 500 * 1024);
+  const withAssets = await inlineLocalImages(withCss, baseDir, 180 * 1024, 350 * 1024);
   const cleaned = sanitizeHtml(withAssets);
 
   const cspMeta =
@@ -509,12 +655,14 @@ export async function renderHtmlFile(rawPath: string): Promise<{
     previewHtml = `<!DOCTYPE html><html><head><meta charset="utf-8">${cspMeta}</head><body>${cleaned}</body></html>`;
   }
 
-  const sourceLimit = 120 * 1024;
+  const sourceLimit = 100 * 1024;
   const sourceTruncated = raw.length > sourceLimit;
   const sourceSlice = sourceTruncated ? raw.slice(0, sourceLimit) : raw;
   const sourceHtml = hljs.highlight(sourceSlice, { language: 'xml', ignoreIllegals: true }).value;
 
-  return { previewHtml, sourceHtml, sourceTruncated, totalBytes: stat.size };
+  const plainText = stripTags(cleaned.replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')).slice(0, 8000);
+
+  return { previewHtml, sourceHtml, sourceTruncated, totalBytes: stat.size, plainText };
 }
 
 export async function renderTextFile(

@@ -30,6 +30,9 @@ async function main() {
   }
 
   console.log(`[install] Installing doc-viewer to ${targetDir} ...`);
+  for (const optionalDir of ['rules', 'skills']) {
+    await fs.rm(path.join(targetDir, optionalDir), { recursive: true, force: true });
+  }
   await copyDir(srcPluginDir, targetDir);
   console.log('[install] Done! Antigravity discovers ~/.gemini/config/plugins/doc-viewer automatically.');
 }

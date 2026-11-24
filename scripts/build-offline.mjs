@@ -48,7 +48,7 @@ async function main() {
     logLevel: 'warning',
   });
 
-  console.log('[build] Copying plugin metadata and skills ...');
+  console.log('[build] Copying plugin metadata ...');
   await copyDir(path.join(rootDir, 'plugin-meta'), pluginOutDir);
 
   console.log('[build] Copying offline PDF.js CMaps and standard fonts ...');
@@ -75,9 +75,20 @@ async function main() {
     throw new Error('app.html contains external http(s) <script> or <link> references');
   }
 
+  // Ensure CSS stylesheet was actually bundled and inlined into app.html (outside <script>)
+  const htmlWithoutScripts = appHtml.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '');
+  const styleBlocks = [...htmlWithoutScripts.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)].map((m) => m[1]);
+  const totalCssBytes = styleBlocks.reduce((acc, s) => acc + Buffer.byteLength(s, 'utf-8'), 0);
+  const combinedCss = styleBlocks.join('\n');
+  if (styleBlocks.length === 0 || totalCssBytes < 4000 || !combinedCss.includes('.app-shell') || !combinedCss.includes('.hidden')) {
+    throw new Error(
+      `app.html is missing inlined UI CSS (<style> blocks: ${styleBlocks.length}, css bytes: ${totalCssBytes}). Check import './styles.css' in src/web/main.ts.`,
+    );
+  }
+
   console.log(
     `[build] Success!\n` +
-      `  app.html:   ${(appStat.size / (1024 * 1024)).toFixed(2)} MiB (${appStat.size} bytes)\n` +
+      `  app.html:   ${(appStat.size / (1024 * 1024)).toFixed(2)} MiB (${appStat.size} bytes, inline CSS: ${(totalCssBytes / 1024).toFixed(1)} KiB)\n` +
       `  server.cjs: ${(serverStat.size / (1024 * 1024)).toFixed(2)} MiB (${serverStat.size} bytes)\n` +
       `  output dir: ${pluginOutDir}`,
   );

@@ -16,7 +16,7 @@ export interface ToolResultHandlers {
 const MAX_CONCURRENT_CALLS = 3;
 
 export class ViewerMcpClient {
-  private readonly app = new App({ name: 'DocViewer', version: '1.0.0' }, {});
+  private readonly app = new App({ name: 'DocViewer', version: '1.0.0' }, {}, { autoResize: false });
   private inFlight = 0;
   private readonly waitQueue: Array<() => void> = [];
   private connected = false;
