@@ -50,7 +50,12 @@
   --diff-add-fg: #86efac;
 
   --paper-shadow: 0 4px 14px rgba(0, 0, 0, 0.44), 0 1px 3px rgba(0, 0, 0, 0.28);
-  --popover-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+  --popover-bg: #25272d;
+  --popover-border: #3d4049;
+  --popover-shadow: 0 14px 36px rgba(0, 0, 0, 0.62);
+  --selection-bg: #262932;
+  --selection-border: rgba(96, 165, 250, 0.38);
+  --selection-shadow: 0 8px 24px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(96, 165, 250, 0.12);
   --float-bg: rgba(28, 30, 36, 0.96);
   --float-shadow: 0 10px 28px rgba(0, 0, 0, 0.52);
   --backdrop-bg: rgba(0, 0, 0, 0.48);
@@ -118,7 +123,12 @@
     --diff-add-bg: rgba(22, 163, 74, 0.1);
     --diff-add-fg: #15803d;
     --paper-shadow: 0 4px 12px rgba(15, 23, 42, 0.12), 0 1px 3px rgba(15, 23, 42, 0.08);
-    --popover-shadow: 0 10px 28px rgba(15, 23, 42, 0.16);
+    --popover-bg: #ffffff;
+    --popover-border: #cbd5e1;
+    --popover-shadow: 0 14px 34px rgba(15, 23, 42, 0.2), 0 2px 8px rgba(15, 23, 42, 0.08);
+    --selection-bg: #ffffff;
+    --selection-border: rgba(37, 99, 235, 0.32);
+    --selection-shadow: 0 8px 24px rgba(15, 23, 42, 0.16), 0 2px 6px rgba(37, 99, 235, 0.1);
     --float-bg: rgba(255, 255, 255, 0.96);
     --float-shadow: 0 8px 24px rgba(15, 23, 42, 0.14);
     --backdrop-bg: rgba(15, 23, 42, 0.28);
@@ -187,7 +197,12 @@
   --diff-add-fg: #15803d;
 
   --paper-shadow: 0 4px 12px rgba(15, 23, 42, 0.12), 0 1px 3px rgba(15, 23, 42, 0.08);
-  --popover-shadow: 0 10px 28px rgba(15, 23, 42, 0.16);
+  --popover-bg: #ffffff;
+  --popover-border: #cbd5e1;
+  --popover-shadow: 0 14px 34px rgba(15, 23, 42, 0.2), 0 2px 8px rgba(15, 23, 42, 0.08);
+  --selection-bg: #ffffff;
+  --selection-border: rgba(37, 99, 235, 0.32);
+  --selection-shadow: 0 8px 24px rgba(15, 23, 42, 0.16), 0 2px 6px rgba(37, 99, 235, 0.1);
   --float-bg: rgba(255, 255, 255, 0.96);
   --float-shadow: 0 8px 24px rgba(15, 23, 42, 0.14);
   --backdrop-bg: rgba(15, 23, 42, 0.28);
@@ -518,8 +533,8 @@ body {
   align-items: center;
   height: 24px;
   border-radius: 6px;
-  border: 1px solid var(--chrome-border);
-  background: var(--chrome-panel-2);
+  border: 1px solid var(--popover-border);
+  background: var(--popover-bg);
   overflow: hidden;
   transition: border-color 120ms ease;
 }
@@ -651,10 +666,10 @@ body {
   position: fixed;
   z-index: 80;
   min-width: 204px;
-  background: var(--chrome-panel-2);
-  border: 1px solid var(--chrome-border);
-  border-radius: 9px;
-  padding: 4px;
+  background: var(--popover-bg);
+  border: 1px solid var(--popover-border);
+  border-radius: 10px;
+  padding: 5px;
   box-shadow: var(--popover-shadow);
   display: flex;
   flex-direction: column;
@@ -671,15 +686,27 @@ body {
   color: var(--chrome-fg);
   text-align: left;
   padding: 6px 9px;
-  border-radius: 6px;
+  border-radius: 7px;
   font-size: 12px;
   font-family: var(--font-ui);
   cursor: pointer;
-  transition: background 110ms ease;
+  transition: background 110ms ease, color 110ms ease;
 }
 
-.menu-item:hover {
-  background: var(--accent-soft);
+.menu-item:hover,
+.menu-item:focus-visible {
+  background: var(--accent);
+  color: #ffffff;
+  outline: none;
+}
+
+.menu-item:hover .open-with-default-tag,
+.menu-item:focus-visible .open-with-default-tag,
+.menu-item:hover .open-with-item-glyph,
+.menu-item:focus-visible .open-with-item-glyph,
+.menu-item:hover .menu-check,
+.menu-item:focus-visible .menu-check {
+  color: rgba(255, 255, 255, 0.92);
 }
 
 .menu-icon {
@@ -2101,19 +2128,19 @@ body {
 }
 
 .selection-bar {
-  position: fixed;
-  top: 78px;
+  position: absolute;
+  top: 12px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 45;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 5px 10px;
-  background: var(--chrome-panel-2);
-  border: 1px solid var(--chrome-border);
+  padding: 5px 8px 5px 12px;
+  background: var(--selection-bg);
+  border: 1px solid var(--selection-border);
   border-radius: 999px;
-  box-shadow: var(--popover-shadow);
+  box-shadow: var(--selection-shadow);
 }
 
 .selection-preview {
@@ -2122,8 +2149,26 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 11.5px;
-  color: var(--fg-2);
-  padding-left: 4px;
+  font-weight: 500;
+  color: var(--chrome-fg);
+}
+
+.selection-bar .btn-sm {
+  border-radius: 999px;
+  padding: 4px 11px;
+  font-weight: 500;
+}
+
+.selection-bar .btn-sm:not(.primary) {
+  background: var(--accent-soft);
+  border-color: var(--selection-border);
+  color: var(--accent-fg);
+}
+
+.selection-bar .btn-sm:not(.primary):hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #ffffff;
 }
 
 .drop-overlay {

@@ -60,7 +60,7 @@
               <svg viewBox="0 0 12 12" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 4.5l3 3 3-3"/></svg>
             </button>
           </div>
-          <button id="btn-folder-browse" class="chrome-icon-btn" title="浏览工作区文件" aria-label="浏览文件夹">
+          <button id="btn-folder-browse" class="chrome-icon-btn" title="切换左侧文件栏（打开 / 关闭）" aria-label="切换左侧文件栏">
             <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 4.2A1.2 1.2 0 013.2 3h2.9l1.2 1.4h5.5A1.2 1.2 0 0114 5.6v6.2a1.2 1.2 0 01-1.2 1.2H3.2A1.2 1.2 0 012 11.8V4.2z"/></svg>
           </button>
         </div>
@@ -217,6 +217,13 @@
 
         <div id="viewer-content" class="viewer-content hidden"></div>
 
+        <!-- Floating Selection Bar -->
+        <div id="selection-bar" class="selection-bar hidden">
+          <span id="selection-preview" class="selection-preview"></span>
+          <button id="sel-attach" class="btn-sm">引用到对话</button>
+          <button id="sel-ask" class="btn-sm primary">让 Agent 解释</button>
+        </div>
+
         <!-- Hover-Revealed Bottom Floating Capsule (only appears when pointer enters bottom area) -->
         <div id="stage-float-bar" class="stage-float-bar hidden" aria-label="文档快捷控制栏">
           <div id="float-nav-group" class="float-group">
@@ -267,13 +274,7 @@
       </aside>
     </div>
 
-    <!-- Floating Selection Bar, Drop Overlay & Toast -->
-    <div id="selection-bar" class="selection-bar hidden">
-      <span id="selection-preview" class="selection-preview"></span>
-      <button id="sel-attach" class="btn-sm">引用到对话</button>
-      <button id="sel-ask" class="btn-sm primary">让 Agent 解释</button>
-    </div>
-
+    <!-- Drop Overlay & Toast -->
     <div id="drop-overlay" class="drop-overlay hidden">
       <div class="drop-box">
         <div class="drop-title">松开即可在 Doc Viewer 中打开</div>

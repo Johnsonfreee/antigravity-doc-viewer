@@ -239,7 +239,9 @@ function isNarrowViewport(): boolean {
 function syncDrawerBackdrop() {
   const leftOpen = !drawerEl.classList.contains('collapsed');
   const rightOpen = !rightDrawerEl.classList.contains('collapsed');
+  const filesTabActive = document.getElementById('drawer-files')?.classList.contains('active') ?? false;
   $('#btn-toggle-drawer').classList.toggle('active', leftOpen);
+  $('#btn-folder-browse').classList.toggle('active', leftOpen && filesTabActive);
   $('#btn-toggle-right').classList.toggle('active', rightOpen);
   drawerBackdropEl.classList.toggle('hidden', !(isNarrowViewport() && (leftOpen || rightOpen)));
 }
@@ -251,6 +253,7 @@ function selectLeftDrawerTab(target: 'files' | 'outline' | 'history') {
   document.querySelectorAll('.drawer-pane').forEach((p) => {
     if (p.id.startsWith('drawer-')) p.classList.toggle('active', p.id === `drawer-${target}`);
   });
+  syncDrawerBackdrop();
 }
 
 function setLeftDrawerOpen(open: boolean) {
@@ -515,6 +518,7 @@ async function refreshRightWorktreePanel() {
     const wt = res.items[0] ?? null;
     tab.worktree = wt;
     renderTabs();
+    syncFloatingCapsule();
 
     const statusLabel = wt?.status === 'draft' ? '有待审核草稿' : '与磁盘同步';
     const versionsHtml = (wt?.versions || []).length
@@ -649,15 +653,33 @@ function renderFileList() {
 }
 
 let stateSaveTimer: number | undefined;
-function scheduleSaveState(patch: Partial<ViewerState>) {
+let pendingStatePatch: Partial<ViewerState> = {};
+
+async function flushStateSave(): Promise<void> {
   window.clearTimeout(stateSaveTimer);
-  stateSaveTimer = window.setTimeout(async () => {
-    try {
-      const res = await mcp.callTool<{ state: ViewerState }>('app_save_state', patch as Record<string, unknown>);
-      state = res.state;
-    } catch {
-      // Ignore background save errors
-    }
+  stateSaveTimer = undefined;
+  const patch = pendingStatePatch;
+  pendingStatePatch = {};
+  if (Object.keys(patch).length === 0) return;
+  try {
+    const res = await mcp.callTool<{ state: ViewerState }>('app_save_state', patch as Record<string, unknown>);
+    state = res.state;
+  } catch {
+    // Ignore background save errors
+  }
+}
+
+function scheduleSaveState(patch: Partial<ViewerState>) {
+  pendingStatePatch = {
+    ...pendingStatePatch,
+    ...patch,
+    ...(patch.filePrefs
+      ? { filePrefs: { ...(pendingStatePatch.filePrefs ?? {}), ...patch.filePrefs } }
+      : {}),
+  };
+  window.clearTimeout(stateSaveTimer);
+  stateSaveTimer = window.setTimeout(() => {
+    void flushStateSave();
   }, 400);
 }
 
@@ -968,6 +990,58 @@ async function activateTab(tabId: string) {
   void refreshRightWorktreePanel();
 }
 
+function isOfficeKind(kind: string): boolean {
+  return kind === 'docx' || kind === 'spreadsheet' || kind === 'slides';
+}
+
+let isSyncingWorktree = false;
+async function syncActiveWorktreeStatus(opts: { silent?: boolean } = {}) {
+  if (isSyncingWorktree) return;
+  const tab = activeTab();
+  if (!tab?.path || tab.isTempDrop || !isOfficeKind(tab.kind)) return;
+
+  isSyncingWorktree = true;
+  try {
+    const res = await mcp.callTool<{ items: WorktreeMeta[] }>('app_get_worktree_status', { path: tab.path });
+    // Ensure tab is still active after async call
+    if (activeTab()?.id !== tab.id) return;
+
+    const prev = tab.worktree ?? null;
+    const next = res.items[0] ?? null;
+
+    const statusChanged = (prev?.status ?? 'clean') !== (next?.status ?? 'clean');
+    const draftUpdated = Boolean(
+      next?.status === 'draft' &&
+        (prev?.updatedAt !== next?.updatedAt || prev?.summary !== next?.summary),
+    );
+    const versionsChanged = (prev?.versions?.length ?? 0) !== (next?.versions?.length ?? 0);
+
+    if (!statusChanged && !draftUpdated && !versionsChanged) return;
+
+    tab.worktree = next;
+    renderTabs();
+    syncFloatingCapsule();
+    if (!rightDrawerEl.classList.contains('collapsed')) {
+      void refreshRightWorktreePanel();
+    }
+
+    if (statusChanged || draftUpdated) {
+      if (tab.mode === 'compare') {
+        await switchActiveMode('compare');
+      } else if (tab.mode === 'print') {
+        await activateTab(tab.id);
+      }
+      if (!opts.silent && next?.status === 'draft') {
+        showToast('检测到新的 Worktree 草稿变更，已自动同步');
+      }
+    }
+  } catch {
+    // Ignore transient polling errors
+  } finally {
+    isSyncingWorktree = false;
+  }
+}
+
 function closeTab(tabId: string) {
   const idx = tabs.findIndex((t) => t.id === tabId);
   if (idx === -1) return;
@@ -1015,11 +1089,28 @@ async function openDiskFile(
 
     const existing = tabs.find((t) => t.path && t.path.toLowerCase() === res.file.path.toLowerCase());
     if (existing) {
+      const prevWt = existing.worktree ?? null;
+      const nextWt = existing.isTempDrop ? null : res.worktree ?? null;
+      const wtChanged =
+        (prevWt?.status ?? 'clean') !== (nextWt?.status ?? 'clean') ||
+        prevWt?.updatedAt !== nextWt?.updatedAt ||
+        prevWt?.summary !== nextWt?.summary;
+      const sheetChanged = Boolean(opts.sheet && opts.sheet !== existing.sheet);
+
       if (opts.page) existing.page = opts.page;
       if (opts.sheet) existing.sheet = opts.sheet;
       if (opts.displayName) existing.name = opts.displayName;
       if (opts.isTempDrop !== undefined) existing.isTempDrop = opts.isTempDrop;
-      existing.worktree = existing.isTempDrop ? null : res.worktree ?? null;
+      existing.worktree = nextWt;
+
+      if (existing.id === activeTabId && !wtChanged && !sheetChanged) {
+        renderTabs();
+        syncFloatingCapsule();
+        if (opts.page && activePdfCtrl) activePdfCtrl.goToPage(opts.page);
+        if (opts.page && activeSlideCtrl) activeSlideCtrl.goToSlide(opts.page);
+        return true;
+      }
+
       await activateTab(existing.id);
       if (opts.page && activePdfCtrl) activePdfCtrl.goToPage(opts.page);
       if (opts.page && activeSlideCtrl) activeSlideCtrl.goToSlide(opts.page);
@@ -1319,7 +1410,12 @@ async function buildContextPayload(): Promise<string> {
   const tab = activeTab();
   if (!tab) return '';
   if (selectedSnippet) {
-    return `[Office Workbench Selection]\nFile: ${tab.path || tab.name}${activePdfCtrl ? ` (Page ${activePdfCtrl.getCurrentPage()})` : ''}\n\n${selectedSnippet}`;
+    const loc = activePdfCtrl
+      ? ` (Page ${activePdfCtrl.getCurrentPage()})`
+      : activeSlideCtrl
+        ? ` (Slide ${activeSlideCtrl.getSlideInfo().current})`
+        : '';
+    return `[Office Workbench Selection]\nFile: ${tab.path || tab.name}${loc}\n\n${selectedSnippet}`;
   }
   if (activePdfCtrl) {
     const text = await activePdfCtrl.getCurrentPageText();
@@ -1489,7 +1585,18 @@ function wireEvents() {
     setLeftDrawerOpen(drawerEl.classList.contains('collapsed'));
   };
   $('#btn-toggle-drawer').addEventListener('click', toggleLeftDrawer);
-  $('#btn-folder-browse').addEventListener('click', () => setLeftDrawerOpen(true));
+  $('#btn-folder-browse').addEventListener('click', () => {
+    const isCollapsed = drawerEl.classList.contains('collapsed');
+    const isFilesActive = document.getElementById('drawer-files')?.classList.contains('active') ?? false;
+    if (isCollapsed) {
+      selectLeftDrawerTab('files');
+      setLeftDrawerOpen(true);
+    } else if (!isFilesActive) {
+      selectLeftDrawerTab('files');
+    } else {
+      setLeftDrawerOpen(false);
+    }
+  });
   $('#welcome-browse').addEventListener('click', () => setLeftDrawerOpen(true));
 
   $('#btn-toggle-right').addEventListener('click', () => {
@@ -1947,6 +2054,20 @@ async function bootstrap() {
   });
 
   updateCapabilitiesUi();
+
+  window.addEventListener('focus', () => {
+    void syncActiveWorktreeStatus();
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      void syncActiveWorktreeStatus();
+    }
+  });
+  window.setInterval(() => {
+    if (document.visibilityState === 'visible') {
+      void syncActiveWorktreeStatus();
+    }
+  }, 2500);
 
   window.setTimeout(async () => {
     if (handledInitialToolResult) return;

@@ -215,7 +215,7 @@ async function main() {
     {
       title: 'Doc & PDF Viewer',
       description:
-        'Open the interactive Office & Document viewer in Antigravity sidebar. Supports true A4 paginated .docx, legacy .doc/.wps/.rtf/.odt, interactive .xlsx/.xls/.et/.csv, .pptx/.ppt/.dps slides, PDF (CJK), Markdown, HTML, and worktree review.',
+        'Open or focus the interactive Office & Document viewer in Antigravity sidebar. Supports true A4 paginated .docx, legacy .doc/.wps/.rtf/.odt, interactive .xlsx/.xls/.et/.csv, .pptx/.ppt/.dps slides, PDF (CJK), Markdown, HTML, and worktree review. Tip: If the user sends a message referencing [Office Workbench Selection] / [Word Document] / [PDF Page] / [Spreadsheet] / [Presentation] on a new conversation, call open_document_viewer with that File path so the viewer stays open in the conversation side pane.',
       inputSchema: {
         path: z.string().optional().describe('Optional path to a .docx, .doc, .wps, .rtf, .odt, .xlsx, .xls, .et, .csv, .pptx, .ppt, .pdf, .md, .html, image, or code file.'),
         rootDir: z.string().optional().describe('Optional directory path to open in the sidebar file browser.'),
